@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quidian</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <!-- Ambient Aurora Mesh Background -->
+    <div class="ambient-glow glow-1"></div>
+    <div class="ambient-glow glow-2"></div>
+    <div class="ambient-glow glow-3"></div>
+
+    <div class="studio-layout">
+        <!-- ============================================== -->
+        <!-- SIDEBAR NAVIGATION HUB                         -->
+        <!-- ============================================== -->
+        <aside class="studio-sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-emblem">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                </div>
+                <div class="brand-text">
+                    <h2><span class="gradient-aurora">QUIDIAN</span></h2>
+                    <span class="studio-version">Media Downloader</span>
+                </div>
+            </div>
+
+            <!-- Navigation Links -->
+            <nav class="sidebar-menu" aria-label="Studio Modules">
+                <button class="nav-item active" onclick="switchModule('universal-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+                    </svg>
+                    <span>Universal Downloader</span>
+                </button>
+
+                <button class="nav-item" onclick="switchModule('playlist-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="8" y1="6" x2="21" y2="6"></line>
+                        <line x1="8" y1="12" x2="21" y2="12"></line>
+                        <line x1="8" y1="18" x2="21" y2="18"></line>
+                        <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                        <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                        <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                    </svg>
+                    <span>Playlist &amp; Batch</span>
+                </button>
+
+                <button class="nav-item" onclick="switchModule('social-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+                        <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+                        <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+                    </svg>
+                    <span>Social Media Scraper</span>
+                </button>
+
+                <button class="nav-item" onclick="switchModule('subtitles-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="4" width="20" height="16" rx="3"></rect>
+                        <path d="M7 15h4M15 15h2M7 11h2M13 11h4"></path>
+                    </svg>
+                    <span>Subtitle Studio</span>
+                </button>
+
+                <button class="nav-item" onclick="switchModule('audio-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 18V5l12-2v13"></path>
+                        <circle cx="6" cy="18" r="3"></circle>
+                        <circle cx="18" cy="16" r="3"></circle>
+                    </svg>
+                    <span>Audio Studio &amp; Ripper</span>
+                </button>
+
+                <button class="nav-item" onclick="switchModule('library-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                    </svg>
+                    <span>Downloads Library</span>
+                </button>
+            </nav>
+
+            <!-- ============================================== -->
+            <!-- LUXURY DEVELOPER SHOWCASE: KAMRAN ASHRAF       -->
+            <!-- ============================================== -->
+            <div class="sidebar-developer-showcase">
+                <div class="showcase-glow-border"></div>
+                <div class="showcase-content">
+                    <div class="avatar-monogram-container">
+                        <div class="monogram-pulse"></div>
+                        <div class="monogram-avatar">
+                            <span>KA</span>
+                        </div>
+                    </div>
+                    <div class="developer-meta">
+                        <div class="developer-role-tag">
+                            <span class="role-icon">⚡</span>
+                            <span class="role-text">DEVELOPER</span>
+                            <span class="verified-badge" title="Verified Creator">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                </svg>
+                            </span>
+                        </div>
+                        <div class="developer-name-glow">
+                            <span class="name-text">Kamran Ashraf</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ============================================== -->
+        <!-- MAIN CONTENT WORKSPACE                         -->
+        <!-- ============================================== -->
+        <main class="studio-main">
+            <!-- Top Telemetry & Global Bar -->
+            <header class="studio-topbar glass-panel-sm">
+                <div class="telemetry-bar">
+                    <span class="telemetry-pill" id="pill-yt"><span class="pulse-dot green"></span>yt-dlp Engine</span>
+                    <span class="telemetry-pill" id="pill-stealth"><span class="pulse-dot purple"></span>Stealth 403 Bypass</span>
+                    <span class="telemetry-pill" id="pill-aria2"><span class="pulse-dot cyan"></span>aria2c Multi-Stream</span>
+                    <span class="telemetry-pill" id="pill-gallery"><span class="pulse-dot purple"></span>gallery-dl Scraper</span>
+                    <span class="telemetry-pill" id="pill-ffmpeg"><span class="pulse-dot amber"></span>Checking FFmpeg...</span>
+                </div>
+
+                <button class="btn-folder-glass" onclick="openFolder()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span>Downloads Folder</span>
+                </button>
+            </header>
+
+            <!-- Warning Banner -->
+            <div id="ffmpeg-warning" class="banner-warning hidden">
+                <div class="warning-icon">⚠️</div>
+                <div class="warning-text">
+                    <strong>FFmpeg is missing from PATH:</strong> Stream merging and audio conversion require FFmpeg. Please install FFmpeg to unlock 4K and MP3 ripping.
+                </div>
+            </div>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 1: UNIVERSAL DOWNLOADER                       -->
+            <!-- ======================================================= -->
+            <section id="universal-module" class="module-view active">
+                <div class="module-card glass-panel">
+                    <div class="module-header">
+                        <div class="module-title-group">
+                            <h2>⚡ Universal Downloader</h2>
+                            <p>Download video or audio from YouTube, TikTok, Facebook, Twitter/X, Vimeo &amp; 1800+ websites.</p>
+                        </div>
+                    </div>
+
+                    <!-- Inner Subtabs: Direct Link vs Search By Name -->
+                    <div class="inner-tabs">
+                        <button class="inner-tab-btn active" onclick="switchInnerTab(event, 'subtab-link')">Paste Direct Link</button>
+                        <button class="inner-tab-btn" onclick="switchInnerTab(event, 'subtab-search')">Search Media by Name</button>
+                    </div>
+
+                    <!-- Subtab: Direct Link -->
+                    <div id="subtab-link" class="inner-tab-content active">
+                        <div class="input-wrapper">
+                            <label for="video-url" class="field-label">
+                                <span>Media URL</span>
+                                <span class="label-hint">Lossless stream extraction</span>
+                            </label>
+                            <div class="input-with-action">
+                                <input type="text" id="video-url" class="glow-input" placeholder="Paste link (YouTube, Instagram, TikTok, Vimeo, X, etc.)...">
+                                <button class="paste-btn" onclick="pasteToInput('video-url')">Paste</button>
+                            </div>
+                        </div>
+
+                        <div class="grid-2-col">
+                            <div class="input-wrapper">
+                                <label for="link-quality" class="field-label">Quality Profile</label>
+                                <select id="link-quality" class="glow-select">
+                                    <option value="4k" selected>⚡ Best Available (Up to 4K auto-merged)</option>
+                                    <option value="best">💎 Absolute Maximum Quality (Up to 8K)</option>
+                                    <option value="1080p">🎬 Full HD 1080p (Crystal Clear)</option>
+                                    <option value="720p">📱 High Definition 720p (Faster)</option>
+                                    <option value="audio">🎵 Studio Audio (MP3 320kbps + Album Art)</option>
+                                </select>
+                            </div>
+
+                            <div class="input-wrapper">
+                                <label class="field-label">Engine Boosters &amp; Security</label>
+                                <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.3rem;">
+                                    <label class="toggle-control">
+                                        <input type="checkbox" id="link-turbo-toggle" checked>
+                                        <span class="toggle-switch"></span>
+                                        <span class="toggle-text">Multi-Connection Turbo (aria2c 16 streams)</span>
+                                    </label>
+                                    <label class="toggle-control">
+                                        <input type="checkbox" id="link-stealth-toggle" checked>
+                                        <span class="toggle-switch"></span>
+                                        <span class="toggle-text">🛡️ Stealth Lock Bypass (Cloudflare &amp; Streams)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="dest-preview-bar">
+                            <div class="dest-preview-info">
+                                <span class="dest-preview-icon">📂</span>
+                                <span class="dest-preview-label">Saving to:</span>
+                                <span class="dest-preview-path" id="current-dest-display">Loading folder...</span>
+                            </div>
+                            <button type="button" class="btn-change-folder-link" onclick="openDestinationModal()">Change Folder</button>
+                        </div>
+
+                        <button id="btn-download-video" class="btn-action-glow" onclick="downloadByLink()">
+                            <span class="btn-text">Start Download</span>
+                            <div class="spinner hidden"></div>
+                        </button>
+
+                        <!-- Progress Container -->
+                        <div id="link-progress" class="progress-container glass-subpanel hidden">
+                            <div class="progress-header">
+                                <div class="progress-title-row">
+                                    <span class="pulse-indicator"></span>
+                                    <span class="progress-title" id="link-progress-title">Initializing Stream...</span>
+                                </div>
+                                <span class="progress-percent-badge" id="link-progress-percent">0%</span>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-bar-fill" id="link-progress-fill"></div>
+                            </div>
+                            <div class="telemetry-stats">
+                                <span class="stat-item" id="stat-speed">⚡ -- MiB/s</span>
+                                <span class="stat-item" id="stat-eta">⏱ Estimating...</span>
+                                <span class="stat-item" id="stat-phase">📦 Preparing</span>
+                            </div>
+                            <button id="link-cancel" class="btn-cancel-glass" onclick="cancelLinkJob()">Cancel Download</button>
+                        </div>
+                        <div id="link-status" class="status-box"></div>
+                    </div>
+
+                    <!-- Subtab: Search Media -->
+                    <div id="subtab-search" class="inner-tab-content">
+                        <div class="input-wrapper">
+                            <label for="search-query" class="field-label">
+                                <span>Search Query</span>
+                                <span class="label-hint">Multi-Source: YouTube, Dailymotion, IMDb, Netflix, Prime Video, Archive.org &amp; Web</span>
+                            </label>
+                            <div class="input-with-action">
+                                <input type="text" id="search-query" class="glow-input" placeholder='Search any movie or video e.g. "Dhoom 3 full movie", "Inception", "Interstellar"...' onkeydown="if(event.key==='Enter')runSearch()">
+                                <button class="paste-btn" onclick="pasteToInput('search-query')">Paste</button>
+                            </div>
+                        </div>
+
+                        <div class="grid-2-col">
+                            <div class="input-wrapper">
+                                <label for="search-quality" class="field-label">Target Quality</label>
+                                <select id="search-quality" class="glow-select">
+                                    <option value="4k" selected>⚡ Best Available (4K / 1080p)</option>
+                                    <option value="best">💎 Absolute Maximum Quality</option>
+                                    <option value="1080p">🎬 Full HD 1080p</option>
+                                    <option value="720p">📱 High Definition 720p</option>
+                                    <option value="audio">🎵 Studio Audio (MP3 320k)</option>
+                                </select>
+
+                                <label class="toggle-control" style="margin-top: 0.8rem;">
+                                    <input type="checkbox" id="search-include-web" checked>
+                                    <span class="toggle-switch"></span>
+                                    <span class="toggle-text">Multi-Source Hub (YouTube, Dailymotion, IMDb, Netflix, Prime, Archive, Web)</span>
+                                </label>
+                            </div>
+
+                            <div class="input-wrapper">
+                                <label class="field-label">Engine Boosters &amp; Security</label>
+                                <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.3rem;">
+                                    <label class="toggle-control">
+                                        <input type="checkbox" id="search-turbo-toggle" checked>
+                                        <span class="toggle-switch"></span>
+                                        <span class="toggle-text">Multi-Connection Turbo (aria2c 16 streams)</span>
+                                    </label>
+                                    <label class="toggle-control">
+                                        <input type="checkbox" id="search-stealth-toggle" checked onchange="updateSearchStealthBadge()">
+                                        <span class="toggle-switch"></span>
+                                        <span class="toggle-text">🛡️ Stealth Lock Bypass (Anti-Bot &amp; Streams)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="dest-preview-bar">
+                            <div class="dest-preview-info">
+                                <span class="dest-preview-icon" id="search-stealth-icon">🛡️</span>
+                                <span class="dest-preview-label">Stealth Protection:</span>
+                                <span class="dest-preview-path" id="search-stealth-badge-label">Active &bull; TLS Impersonation &amp; Cloudflare Bypass</span>
+                            </div>
+                            <button type="button" class="btn-change-folder-link" onclick="openDestinationModal()">Change Folder</button>
+                        </div>
+
+                        <button id="btn-search" class="btn-action-glow" onclick="runSearch()">
+                            <span class="btn-text">Search Results</span>
+                            <div class="spinner hidden"></div>
+                        </button>
+
+                        <div id="search-results" class="results-grid"></div>
+                        <div id="search-status" class="status-box"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 2: PLAYLIST & BATCH STUDIO                    -->
+            <!-- ======================================================= -->
+            <section id="playlist-module" class="module-view">
+                <div class="module-card glass-panel">
+                    <div class="module-header">
+                        <h2>📑 Playlist &amp; Batch Studio</h2>
+                        <p>Inspect entire YouTube playlists, select individual videos, or queue a batch list of URLs.</p>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label for="playlist-url" class="field-label">
+                            <span>Playlist or Channel Link</span>
+                            <span class="label-hint">Auto-inspects all entries without downloading</span>
+                        </label>
+                        <div class="input-with-action">
+                            <input type="text" id="playlist-url" class="glow-input" placeholder="Paste YouTube / SoundCloud playlist link...">
+                            <button class="paste-btn" onclick="pasteToInput('playlist-url')">Paste</button>
+                        </div>
+                    </div>
+
+                    <div class="action-row">
+                        <button id="btn-inspect-playlist" class="btn-action-glow" style="width: auto; padding: 0.8rem 1.6rem;" onclick="inspectPlaylist()">
+                            <span class="btn-text">Inspect Playlist</span>
+                            <div class="spinner hidden"></div>
+                        </button>
+                    </div>
+
+                    <!-- Playlist Inspector Results -->
+                    <div id="playlist-results-wrap" class="glass-subpanel hidden" style="margin-top: 1.5rem;">
+                        <div class="playlist-header-summary">
+                            <div>
+                                <h3 id="pl-title" class="gradient-aurora" style="font-size: 1.25rem;">Playlist Title</h3>
+                                <p id="pl-meta" style="font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem;">0 items &bull; Creator</p>
+                            </div>
+                            <button class="btn-action-glow" style="width: auto; padding: 0.6rem 1.2rem; font-size: 0.9rem;" onclick="downloadSelectedPlaylistItems()">Download Selected</button>
+                        </div>
+
+                        <div class="playlist-table-container">
+                            <table class="studio-table" id="playlist-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 40px;"><input type="checkbox" id="check-all-pl" checked onchange="toggleAllPlaylistCheckboxes(this)"></th>
+                                        <th>#</th>
+                                        <th>Title</th>
+                                        <th>Duration</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="playlist-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="playlist-status" class="status-box"></div>
+                </div>
+            </section>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 3: SOCIAL MEDIA SCRAPER (gallery-dl)          -->
+            <!-- ======================================================= -->
+            <section id="social-module" class="module-view">
+                <div class="module-card glass-panel">
+                    <div class="module-header">
+                        <h2>📸 Social Media &amp; Gallery Scraper</h2>
+                        <p>Powered by <code>gallery-dl</code> &bull; Scrapes Instagram Reels, TikTok videos, Reddit carousels, Twitter/X media, and Pinterest boards.</p>
+                    </div>
+
+                    <div class="supported-badges">
+                        <span class="platform-tag">Instagram</span>
+                        <span class="platform-tag">TikTok</span>
+                        <span class="platform-tag">Reddit</span>
+                        <span class="platform-tag">Twitter / X</span>
+                        <span class="platform-tag">Pinterest</span>
+                        <span class="platform-tag">Imgur</span>
+                    </div>
+
+                    <div class="input-wrapper" style="margin-top: 1.2rem;">
+                        <label for="social-url" class="field-label">Post or Profile URL</label>
+                        <div class="input-with-action">
+                            <input type="text" id="social-url" class="glow-input" placeholder="https://www.instagram.com/p/... or TikTok, Reddit link...">
+                            <button class="paste-btn" onclick="pasteToInput('social-url')">Paste</button>
+                        </div>
+                    </div>
+
+                    <button id="btn-social-download" class="btn-action-glow" onclick="scrapeSocialMedia()">
+                        <span class="btn-text">Scrape &amp; Download Media</span>
+                        <div class="spinner hidden"></div>
+                    </button>
+
+                    <div id="social-status" class="status-box"></div>
+                </div>
+            </section>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 4: SUBTITLE STUDIO                           -->
+            <!-- ======================================================= -->
+            <section id="subtitles-module" class="module-view">
+                <div class="module-card glass-panel">
+                    <div class="module-header">
+                        <h2>🎙️ Subtitle Studio</h2>
+                        <p>Download accurate subtitles for any streaming video and convert them cleanly to standard <code>.srt</code> format.</p>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label for="sub-input" class="field-label">Video URL</label>
+                        <div class="input-with-action">
+                            <input type="text" id="sub-input" class="glow-input" placeholder="Paste video link here...">
+                            <button class="paste-btn" onclick="pasteToInput('sub-input')">Paste</button>
+                        </div>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label for="sub-lang" class="field-label">Language Code</label>
+                        <input type="text" id="sub-lang" class="glow-input lang-code-input" placeholder="en" value="en">
+                        <div class="lang-chips-bar">
+                            <button type="button" class="lang-chip active" onclick="setLang('en', this)">English (en)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('ur', this)">Urdu (ur)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('es', this)">Spanish (es)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('hi', this)">Hindi (hi)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('ar', this)">Arabic (ar)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('fr', this)">French (fr)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('de', this)">German (de)</button>
+                            <button type="button" class="lang-chip" onclick="setLang('ja', this)">Japanese (ja)</button>
+                        </div>
+                    </div>
+
+                    <button id="btn-download-subtitle" class="btn-action-glow" onclick="downloadSubtitle()">
+                        <span class="btn-text">Extract Subtitles (.srt)</span>
+                        <div class="spinner hidden"></div>
+                    </button>
+
+                    <div id="subtitle-status" class="status-box"></div>
+                </div>
+            </section>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 5: AUDIO STUDIO & CONVERTER                   -->
+            <!-- ======================================================= -->
+            <section id="audio-module" class="module-view">
+                <div class="module-card glass-panel">
+                    <div class="module-header">
+                        <h2>🎛️ Audio Studio &amp; Tagging Ripper</h2>
+                        <p>Rip lossless audio from online links or transcode local video/audio files with custom ID3 metadata tags.</p>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label for="audio-source" class="field-label">Online URL or Local File Path</label>
+                        <div class="input-with-action">
+                            <input type="text" id="audio-source" class="glow-input" placeholder="YouTube song link or C:\Path\To\Video.mp4">
+                            <button class="paste-btn" onclick="pasteToInput('audio-source')">Paste</button>
+                        </div>
+                    </div>
+
+                    <div class="grid-2-col">
+                        <div class="input-wrapper">
+                            <label for="audio-format" class="field-label">Target Format</label>
+                            <select id="audio-format" class="glow-select">
+                                <option value="mp3" selected>MP3 (Universal compatibility)</option>
+                                <option value="flac">FLAC (Lossless Studio Quality)</option>
+                                <option value="aac">AAC (Modern High-Efficiency)</option>
+                                <option value="wav">WAV (Raw Uncompressed PCM)</option>
+                            </select>
+                        </div>
+                        <div class="input-wrapper">
+                            <label for="audio-bitrate" class="field-label">Bitrate Profile</label>
+                            <select id="audio-bitrate" class="glow-select">
+                                <option value="320k" selected>320 kbps (Maximum Quality)</option>
+                                <option value="256k">256 kbps (High Fidelity)</option>
+                                <option value="192k">192 kbps (Balanced)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Metadata ID3 Tag Group -->
+                    <div class="glass-subpanel" style="margin-bottom: 1.5rem;">
+                        <h4 style="font-size: 0.88rem; margin-bottom: 0.8rem; color: var(--aurora-2);">Optional ID3 Metadata Tags</h4>
+                        <div class="grid-3-col">
+                            <input type="text" id="audio-tag-title" class="glow-input" placeholder="Track Title">
+                            <input type="text" id="audio-tag-artist" class="glow-input" placeholder="Artist Name">
+                            <input type="text" id="audio-tag-album" class="glow-input" placeholder="Album Name">
+                        </div>
+                    </div>
+
+                    <button id="btn-rip-audio" class="btn-action-glow" onclick="ripAudio()">
+                        <span class="btn-text">Transcode &amp; Export Audio</span>
+                        <div class="spinner hidden"></div>
+                    </button>
+
+                    <div id="audio-status" class="status-box"></div>
+                </div>
+            </section>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 6: DOWNLOADS LIBRARY                          -->
+            <!-- ======================================================= -->
+            <section id="library-module" class="module-view">
+                <div class="module-card glass-panel">
+                    <div class="module-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <h2>🕒 Downloads Library</h2>
+                            <p id="lib-path-label" style="font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-dim);">Scanning Downloads...</p>
+                        </div>
+                        <button class="btn-folder-glass" onclick="loadLibrary()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <polyline points="1 20 1 14 7 14"></polyline>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                            </svg>
+                            <span>Refresh Library</span>
+                        </button>
+                    </div>
+
+                    <div id="library-items-grid" class="library-grid" style="margin-top: 1.5rem;"></div>
+                    <div id="library-status" class="status-box"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- ============================================== -->
+    <!-- POP-UP MODAL: DOWNLOAD DESTINATION PICKER       -->
+    <!-- ============================================== -->
+    <div id="destination-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeDestinationModal()">
+        <div class="modal-card glass-panel" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-badge">📁</div>
+                    <div>
+                        <h3>Choose Download Destination</h3>
+                        <p>Where would you like to save this download?</p>
+                    </div>
+                </div>
+                <button class="modal-close-btn" onclick="closeDestinationModal()" aria-label="Close dialog">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Current Selected Path Box -->
+                <div class="input-wrapper">
+                    <label class="field-label">
+                        <span>Save Location</span>
+                        <span class="label-hint">Full filesystem directory</span>
+                    </label>
+                    <div class="dest-path-box">
+                        <input type="text" id="modal-dest-input" class="glow-input mono-text" placeholder="C:\Users\..." readonly>
+                        <button class="btn-browse-native" onclick="browseFolderFromModal()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                            <span>Browse Windows Folder...</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Quick Preset Chips -->
+                <div class="quick-presets-label">QUICK FOLDER PRESETS</div>
+                <div class="quick-presets-grid">
+                    <button type="button" class="preset-chip active" id="chip-downloads" onclick="selectPresetPath('downloads', this)">
+                        <span class="chip-icon">📥</span>
+                        <span class="chip-title">Downloads</span>
+                    </button>
+                    <button type="button" class="preset-chip" id="chip-desktop" onclick="selectPresetPath('desktop', this)">
+                        <span class="chip-icon">🖥️</span>
+                        <span class="chip-title">Desktop</span>
+                    </button>
+                    <button type="button" class="preset-chip" id="chip-videos" onclick="selectPresetPath('videos', this)">
+                        <span class="chip-icon">🎬</span>
+                        <span class="chip-title">Videos</span>
+                    </button>
+                    <button type="button" class="preset-chip" id="chip-project" onclick="selectPresetPath('project', this)">
+                        <span class="chip-icon">📦</span>
+                        <span class="chip-title">Project Folder</span>
+                    </button>
+                </div>
+
+                <!-- Stealth Notice -->
+                <div class="stealth-notice-badge">
+                    <span class="pulse-dot green"></span>
+                    <span><strong>Stealth Lock Bypass Active:</strong> Automatic Cloudflare 403 &amp; stream sniffing enabled</span>
+                </div>
+
+                <div class="modal-options-row">
+                    <label class="toggle-control small">
+                        <input type="checkbox" id="modal-remember-toggle">
+                        <span class="toggle-switch"></span>
+                        <span class="toggle-text">Remember this location as default (don't ask every time)</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn-cancel-glass" onclick="closeDestinationModal()">Cancel</button>
+                <button id="modal-confirm-btn" class="btn-action-glow modal-confirm-btn" onclick="confirmDestinationDownload()">
+                    <span class="btn-text">Confirm &amp; Start Download ⚡</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======================================================= -->
+    <!-- DIRECT CINEMA STREAM MODAL (BYPASSES LOGIN SCREENS)     -->
+    <!-- ======================================================= -->
+    <div id="cinema-modal" class="cinema-modal-overlay hidden" onclick="if(event.target===this)closeCinemaModal()">
+        <div class="cinema-modal-container glass-panel">
+            <div class="cinema-modal-header">
+                <div class="cinema-title-group">
+                    <span class="cinema-badge" style="background: rgba(16, 185, 129, 0.2); border-color: rgba(16, 185, 129, 0.4); color: #34d399;">🛡️ QUIDIAN ADSHIELD ACTIVE &bull; ZERO ADS &bull; 100% PRIVATE</span>
+                    <h3 id="cinema-movie-title">Direct Movie Stream</h3>
+                </div>
+                <div class="cinema-controls">
+                    <button type="button" class="btn-cinema-source" id="btn-cinema-switch-server" onclick="cycleCinemaServer()">🔄 Switch Server</button>
+                    <button type="button" class="btn-cinema-close" onclick="closeCinemaModal()">&times;</button>
+                </div>
+            </div>
+            <div class="cinema-player-wrapper">
+                <iframe id="cinema-iframe" src="" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation" allowfullscreen="true" webkitallowfullscreen="true" mozallowfullscreen="true" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"></iframe>
+            </div>
+            <div class="cinema-modal-footer">
+                <div class="cinema-server-info">
+                    <span id="cinema-server-label" style="font-weight: 700; color: var(--aurora-2);">Server 1 (VidLink Pro HD)</span> &bull; 
+                    <span style="color: var(--text-dim);">Clean Direct Stream &bull; Zero Click-Ads</span>
+                </div>
+                <button type="button" class="btn-cinema-download" id="cinema-download-btn" onclick="downloadFromCinemaModal()">
+                    ⚡ Download Offline MP4
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
+
+

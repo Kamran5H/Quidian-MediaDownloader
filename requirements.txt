@@ -1,0 +1,7 @@
+flask>=3.0.0
+yt-dlp>=2026.8.19
+requests>=2.31.0
+duckduckgo-search
+gallery-dl>=1.27.0
+mutagen>=1.47.0
+curl_cffi>=0.7.0

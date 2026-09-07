@@ -1,0 +1,27 @@
+# Downloads & outputs
+Downloads/
+*.mp4
+*.mp3
+*.mkv
+*.webm
+*.vtt
+*.srt
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.class
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+*.log
