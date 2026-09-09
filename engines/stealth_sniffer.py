@@ -367,13 +367,23 @@ class StealthStreamInterceptor:
 
         safe_lecture_title = re.sub(r'[\\/*?:"<>|]', "", lecture_title).strip()
         safe_course_title = re.sub(r'[\\/*?:"<>|]', "", course_title).strip()
-        out_tmpl = os.path.join(self.output_path, f"{safe_lecture_title} [{course_slug}].%(ext)s")
+
+        # Stage into a private temp directory. Writing straight into the user's
+        # Downloads folder left multi-gigabyte ".part" files behind whenever a
+        # lecture download failed or was cancelled.
+        session = uuid.uuid4().hex[:10]
+        stage_dir = os.path.join(tempfile.gettempdir(), f"course_stage_{session}")
+        chunk_dir = os.path.join(tempfile.gettempdir(), f"course_chunks_{session}")
+        os.makedirs(stage_dir, exist_ok=True)
+        os.makedirs(chunk_dir, exist_ok=True)
 
         ydl_opts = {
             "format": format_spec,
             "format_sort": ["res", "fps", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"],
-            "outtmpl": out_tmpl,
+            "paths": {"home": stage_dir, "temp": chunk_dir},
+            "outtmpl": {"default": f"{safe_lecture_title} [{course_slug}].%(ext)s"},
             "windowsfilenames": True,
+            "trim_file_name": 180,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [ydl_hook],
@@ -385,33 +395,42 @@ class StealthStreamInterceptor:
             "extractor_retries": 3,
             "socket_timeout": 30,
             "noprogress": True,
+            "overwrites": False,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            res_info = ydl.extract_info(resolved_url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(resolved_url, download=True)
+            self._abort_if_cancelled()
 
-        # 4. Exact File Path Resolution
-        final_file = None
-        if res_info:
-            prepared = ydl.prepare_filename(res_info)
-            base, _ = os.path.splitext(prepared)
-            target_file = f"{base}.{expected_ext}"
-            if os.path.exists(target_file):
-                final_file = target_file
-            elif os.path.exists(prepared):
-                final_file = prepared
+            # 4. Move the finished media out of staging. Only real output can be
+            # returned - the old code fell back to a filename it never verified
+            # existed, and could even pick up an unrelated pre-existing file
+            # from the user's folder.
+            produced = [
+                os.path.join(stage_dir, f) for f in os.listdir(stage_dir)
+                if os.path.isfile(os.path.join(stage_dir, f))
+                and os.path.splitext(f)[1].lower() not in (".part", ".ytdl", ".jpg", ".png", ".webp")
+            ]
+            if not produced:
+                raise RuntimeError("The lecture stream downloaded no playable output.")
 
-        if not final_file:
-            expected_file = os.path.join(self.output_path, f"{safe_lecture_title} [{course_slug}].{expected_ext}")
-            if os.path.exists(expected_file):
-                final_file = expected_file
-            else:
-                for f in os.listdir(self.output_path):
-                    if f.startswith(safe_lecture_title[:25]) and f.endswith(f".{expected_ext}"):
-                        final_file = os.path.join(self.output_path, f)
-                        break
-                if not final_file:
-                    final_file = expected_file
+            produced.sort(key=os.path.getsize, reverse=True)
+            final_file = self._unique_path(
+                os.path.join(self.output_path, os.path.basename(produced[0]))
+            )
+            shutil.move(produced[0], final_file)
+
+            # Carry any remaining sidecars across too.
+            for extra in produced[1:]:
+                try:
+                    shutil.move(extra, self._unique_path(
+                        os.path.join(self.output_path, os.path.basename(extra))))
+                except Exception:
+                    pass
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            shutil.rmtree(chunk_dir, ignore_errors=True)
 
         self.log(f"Stream saved: {os.path.basename(final_file)}", 100)
         return {

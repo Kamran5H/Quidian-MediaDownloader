@@ -181,6 +181,30 @@ class TestJobRegistry(unittest.TestCase):
         err = RuntimeError("Video unavailable: the premiere was cancelled by the uploader")
         self.assertFalse(appmod._was_cancelled(jid, err))
 
+    def test_orphan_staging_is_reclaimed_but_only_when_stale(self):
+        """A crashed run leaves multi-GB staging folders in %TEMP% forever."""
+        import time as _time
+        root = tempfile.gettempdir()
+        stale = os.path.join(root, "studio_stage_unittest_stale")
+        fresh = os.path.join(root, "studio_stage_unittest_fresh")
+        foreign = os.path.join(root, "someone_elses_unittest_dir")
+        for d in (stale, fresh, foreign):
+            os.makedirs(d, exist_ok=True)
+        try:
+            old = _time.time() - (24 * 3600)
+            os.utime(stale, (old, old))
+            os.utime(foreign, (old, old))
+
+            appmod.sweep_orphan_staging()
+
+            self.assertFalse(os.path.isdir(stale), "stale staging dir was not reclaimed")
+            self.assertTrue(os.path.isdir(fresh), "a fresh dir from a live run was deleted")
+            self.assertTrue(os.path.isdir(foreign), "a directory we do not own was deleted")
+        finally:
+            import shutil as _shutil
+            for d in (stale, fresh, foreign):
+                _shutil.rmtree(d, ignore_errors=True)
+
     def test_registry_is_bounded(self):
         for _ in range(20):
             jid = appmod._new_job("batch_item")
@@ -293,6 +317,20 @@ class TestDownloader(unittest.TestCase):
             self.assertIn(key, ydl.params, f"yt-dlp does not know option {key!r}")
         ydl.close()
 
+    def test_aria2c_cancellation_tradeoff_is_documented(self):
+        import inspect
+        from engines import downloader
+        source = inspect.getsource(downloader.build_engine_opts)
+        self.assertIn("interrupt aria2c mid-stream", source)
+
+    def test_aria2c_args_include_retry_and_timeout(self):
+        opts = build_engine_opts("stage", "temp", use_turbo=True)
+        args = opts.get("external_downloader_args")
+        if args is None:
+            self.skipTest("aria2c is not installed on this machine")
+        self.assertIn("--max-tries=5", args)
+        self.assertIn("--connect-timeout=20", args)
+
     def test_quality_presets_cover_the_ui_options(self):
         for q in ("best", "4k", "1080p", "720p", "audio"):
             self.assertIn(q, QUALITY_FORMATS)
@@ -343,6 +381,59 @@ class TestDownloader(unittest.TestCase):
     def test_short_runtime_still_disqualifies_a_movie(self):
         clip = {"title": "Inception 2010", "duration": 300, "uploader": "Someone"}
         self.assertLess(_score_movie_candidate(clip, "Inception 2010"), -900)
+
+
+# ---------------------------------------------------------------------------
+# Stealth interceptor
+# ---------------------------------------------------------------------------
+class TestStealthInterceptor(unittest.TestCase):
+    def test_course_download_is_staged_not_written_to_downloads(self):
+        """BUG: the course resolver pointed yt-dlp straight at the user's
+        Downloads folder, so a failed lecture left a multi-GB .part file there."""
+        import inspect
+        from engines.stealth_sniffer import StealthStreamInterceptor
+        source = inspect.getsource(StealthStreamInterceptor._resolve_course_media)
+        self.assertIn("course_stage_", source)
+        self.assertIn('"paths": {"home": stage_dir, "temp": chunk_dir}', source)
+        self.assertIn("shutil.rmtree(stage_dir, ignore_errors=True)", source)
+
+    def test_course_resolver_never_returns_a_phantom_path(self):
+        """BUG: when nothing was produced it returned a filename it had never
+        checked existed - and could pick up an unrelated pre-existing file."""
+        import inspect
+        from engines.stealth_sniffer import StealthStreamInterceptor
+        source = inspect.getsource(StealthStreamInterceptor._resolve_course_media)
+        self.assertNotIn("final_file = expected_file", source)
+        self.assertIn("downloaded no playable output", source)
+
+    def test_ffmpeg_is_killed_not_abandoned(self):
+        """BUG: communicate(timeout=...) raised but left FFmpeg running, writing
+        to the user's disk forever."""
+        import inspect
+        from engines.stealth_sniffer import StealthStreamInterceptor
+        source = inspect.getsource(StealthStreamInterceptor._run_ffmpeg)
+        self.assertIn("self._kill(p)", source)
+        self.assertIn("timed out", source)
+
+    def test_partial_downloads_are_removed(self):
+        import inspect
+        from engines.stealth_sniffer import StealthStreamInterceptor
+        source = inspect.getsource(StealthStreamInterceptor._stream_to_file)
+        self.assertIn("_remove_quietly(dest)", source)
+
+    def test_manifests_are_preferred_over_the_first_response(self):
+        """The first captured .mp4 is very often an ad or preview segment."""
+        import inspect
+        from engines.stealth_sniffer import StealthStreamInterceptor
+        source = inspect.getsource(StealthStreamInterceptor._sniff_with_playwright)
+        self.assertIn('priority = {"hls": 0, "dash": 1, "mp4": 2}', source)
+
+    def test_interceptor_accepts_a_cancel_check(self):
+        from engines.stealth_sniffer import StealthStreamInterceptor
+        i = StealthStreamInterceptor(output_path=tempfile.gettempdir(), cancel_check=lambda: True)
+        self.assertTrue(i.cancelled())
+        with self.assertRaises(Exception):
+            i._abort_if_cancelled()
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +740,13 @@ class TestFrontEnd(unittest.TestCase):
     def test_pollers_handle_expired_jobs(self):
         self.assertGreaterEqual(self.js.count('status === "expired"'), 2)
         self.assertGreaterEqual(self.js.count("missCount"), 4)
+
+    def test_cancelling_state_is_surfaced_not_frozen(self):
+        """With aria2c turbo the transfer cannot be interrupted mid-stream, so
+        the UI must say "Cancelling" rather than appear stuck."""
+        self.assertIn("data.cancel && data.status !==", self.js)
+        self.assertIn("j.cancel && j.status !==", self.js)
+        self.assertIn("Cancelling", self.js)
 
     def test_batch_uses_the_bulk_progress_endpoint(self):
         self.assertIn("/api/progress_bulk", self.js)

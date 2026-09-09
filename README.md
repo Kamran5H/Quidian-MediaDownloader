@@ -139,6 +139,17 @@ cross-origin requests.
 
 ---
 
+## Known behaviour: cancelling a turbo download
+
+When `aria2c` turbo is enabled, yt-dlp hands the transfer to aria2c and stops
+emitting progress callbacks, so a cancel request cannot interrupt the stream
+mid-flight. The job shows **Cancelling...** and finishes as cancelled at the
+next format boundary or at post-processing. Nothing partial is ever written to
+your destination folder - downloads are staged in a temp directory that is
+wiped on failure or cancellation. Turn turbo off for instant cancellation.
+
+---
+
 ## Tests
 
 ```bash

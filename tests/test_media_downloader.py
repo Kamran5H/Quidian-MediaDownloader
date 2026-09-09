@@ -39,13 +39,22 @@ class TestCodebaseScrutiny(unittest.TestCase):
         mock_ydl.return_value.__enter__.return_value = mock_instance
 
         interceptor = StealthStreamInterceptor()
-        # Coursera URL: previously threw UnboundLocalError at dur_info evaluation
-        res = interceptor._resolve_course_media("https://www.coursera.org/learn/machine-learning/lecture/xyz")
-        self.assertTrue(res is None or isinstance(res, dict))
 
-        # Skillshare URL
-        res2 = interceptor._resolve_course_media("https://www.skillshare.com/classes/Graphic-Design-Basics/12345")
-        self.assertTrue(res2 is None or isinstance(res2, dict))
+        def resolve(url):
+            """Return the result, or the exception type, but never a NameError."""
+            try:
+                res = interceptor._resolve_course_media(url)
+                self.assertTrue(res is None or isinstance(res, dict))
+                return res
+            except (UnboundLocalError, NameError) as e:
+                self.fail(f"Unbound name in the course resolver: {e}")
+            except RuntimeError:
+                # Expected with a mocked yt-dlp: no output file is produced, and
+                # the resolver now reports that instead of inventing a path.
+                return None
+
+        resolve("https://www.coursera.org/learn/machine-learning/lecture/xyz")
+        resolve("https://www.skillshare.com/classes/Graphic-Design-Basics/12345")
 
     def test_library_executable_blocking_security(self):
         """Verify open_downloaded_file blocks .exe, .bat, .cmd and dangerous executables."""

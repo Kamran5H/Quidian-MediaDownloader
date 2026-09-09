@@ -272,6 +272,45 @@ def _prune_jobs():
             JOBS.pop(j["id"], None)
 
 
+# Staging directories this app creates under the system temp dir. A crash or a
+# hard kill leaves these behind, and they can hold gigabytes.
+_STAGING_PREFIXES = ("studio_stage_", "studio_chunks_", "course_stage_",
+                     "course_chunks_", "audio_stage_", "audio_temp_",
+                     "sub_stage_", "sub_temp_")
+_STAGING_MAX_AGE = 6 * 3600
+
+
+def sweep_orphan_staging(max_age=_STAGING_MAX_AGE):
+    """Reclaim staging directories orphaned by a previous crashed run.
+
+    Only this app's own distinctively-prefixed directories are touched, and
+    only once they are older than `max_age`, so a concurrently running instance
+    is never disturbed. Returns the number of directories removed.
+    """
+    import tempfile
+    root = tempfile.gettempdir()
+    now = time.time()
+    removed = 0
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return 0
+    for name in entries:
+        if not name.startswith(_STAGING_PREFIXES):
+            continue
+        path = os.path.join(root, name)
+        try:
+            if not os.path.isdir(path):
+                continue
+            if now - os.path.getmtime(path) < max_age:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed += not os.path.exists(path)
+        except OSError:
+            continue
+    return removed
+
+
 _STOP_PRUNE = threading.Event()
 
 
@@ -280,11 +319,19 @@ def _periodic_prune():
         try:
             with JOBS_LOCK:
                 _prune_jobs()
+            sweep_orphan_staging()
         except Exception as e:
             app.logger.warning("Periodic prune warning: %s", e)
 
 
 threading.Thread(target=_periodic_prune, name="quidian-prune", daemon=True).start()
+
+try:
+    _reclaimed = sweep_orphan_staging()
+    if _reclaimed:
+        print(f"[Quidian] Reclaimed {_reclaimed} orphaned staging folder(s) from a previous run.")
+except Exception:
+    pass
 
 
 def _new_job(job_type="download"):

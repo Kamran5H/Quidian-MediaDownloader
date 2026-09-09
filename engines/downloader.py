@@ -201,7 +201,15 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
         "http_headers": headers,
     }
 
-    # aria2c turbo multi-connection acceleration (16 parallel streams)
+    # aria2c turbo multi-connection acceleration (16 parallel streams).
+    #
+    # Trade-off worth knowing: yt-dlp does not call progress hooks while an
+    # external downloader owns the transfer, so a cancel request cannot
+    # interrupt aria2c mid-stream. It takes effect at the next format boundary
+    # or at post-processing. Nothing partial ever reaches the user's folder -
+    # the staging directory is wiped in `finally` - but the job can sit in
+    # "Cancelling..." until the current stream finishes. Turning turbo off
+    # makes cancellation immediate.
     if use_turbo and check_aria2c_installed():
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = [

@@ -74,11 +74,34 @@ if %errorlevel% equ 0 (
 :: 5. Verification Test
 echo.
 echo [*] Performing engine self-test...
-python -c "import flask, yt_dlp, gallery_dl, mutagen, app; print('[OK] All engines compiled and operational!')"
+python -c "import flask, yt_dlp, gallery_dl, mutagen, curl_cffi, app; print('[OK] All required engines compiled and operational!')"
 if %errorlevel% neq 0 (
     echo [ERROR] Engine self-test failed. Please review error messages above.
     pause
     exit /b 1
+)
+
+:: Optional engine: Playwright powers deep stream interception only.
+python -c "import playwright" >nul 2>nul
+if %errorlevel% equ 0 (
+    echo [OK] Playwright deep stream interceptor available.
+) else (
+    echo [INFO] Playwright not installed - deep stream sniffing is disabled.
+    echo        Optional: 'python -m pip install playwright' then 'python -m playwright install chromium'.
+)
+
+:: 6. Regression suite
+echo.
+echo [*] Would you like to run the regression test suite? (recommended after an update)
+set /p RUN_TESTS="(Y/N, default=N): "
+if /i "!RUN_TESTS!"=="Y" (
+    python -m pytest tests/ -q
+    if !errorlevel! neq 0 (
+        echo [WARNING] Some tests failed. The app will still launch, but review the output above.
+        pause
+    ) else (
+        echo [OK] All tests passed.
+    )
 )
 
 echo.

@@ -357,16 +357,14 @@ function cancelLinkJob() {
 
     fetch(`/api/cancel/${activeLinkJobId}`, { method: "POST" })
         .then(() => {
-            if (activeProgressTimer) {
-                clearInterval(activeProgressTimer);
-                activeProgressTimer = null;
-            }
+            // Deliberately leave the poller running: it reports the final
+            // "cancelled" state once the worker actually unwinds.
             const statusBox = document.getElementById("link-status");
             const btn = document.getElementById("btn-download-video");
             setBtnLoading(btn, false);
-            showStatus(statusBox, "Download cancelled by user.", "info");
+            showStatus(statusBox, "Cancelling download - it will stop at the next safe point.", "info");
             const progTitle = document.getElementById("link-progress-title");
-            if (progTitle) progTitle.textContent = "Cancelled";
+            if (progTitle) progTitle.textContent = "Cancelling...";
         })
         .catch(console.error);
 }
@@ -411,7 +409,13 @@ function pollJobProgress(jobId, onComplete) {
             return;
         }
 
-        if (data.status === "downloading") {
+        if (data.cancel && data.status !== "cancelled") {
+            // A cancel is in flight. With aria2c turbo the transfer cannot be
+            // interrupted mid-stream, so say so rather than looking frozen.
+            if (phaseEl) phaseEl.textContent = "\u23F9 Cancelling - stopping at the next safe point...";
+            if (speedEl) speedEl.textContent = "";
+            if (etaEl) etaEl.textContent = "";
+        } else if (data.status === "downloading") {
             const pct = Math.min(100, Math.max(0, data.percent || 0)).toFixed(0);
             if (fillEl) fillEl.style.width = `${pct}%`;
             if (pctEl) pctEl.textContent = `${pct}%`;
@@ -901,7 +905,10 @@ async function executeDownloadSearchResult(url, idx, outputPath) {
                 return;
             }
 
-            if (j.status === "downloading") {
+            if (j.cancel && j.status !== "cancelled") {
+                if (pctEl) pctEl.textContent = "Cancelling...";
+                if (speedElC) speedElC.textContent = "";
+            } else if (j.status === "downloading") {
                 const pct = Math.min(100, Math.max(0, j.percent || 0)).toFixed(0);
                 if (fill) fill.style.width = `${pct}%`;
                 if (pctEl) pctEl.textContent = `${pct}%  ${j.phase ? "\u00B7 " + j.phase : ""}`;
