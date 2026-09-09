@@ -3,12 +3,11 @@ warnings.filterwarnings("ignore")
 
 import os
 import re
-import sys
 import time
-import json
 import shutil
 import subprocess
 import tempfile
+import uuid
 from urllib.parse import urlparse
 try:
     from curl_cffi import requests as cffi_requests
@@ -35,6 +34,18 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 
+class InterceptorCancelled(Exception):
+    """Raised when the user cancels while the interceptor is running."""
+
+
+def _remove_quietly(path):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 class StealthStreamInterceptor:
     """
     Stealth bypass and stream extraction engine.
@@ -43,19 +54,42 @@ class StealthStreamInterceptor:
     3. Downloads and reassembles media using FFmpeg or aria2c into the destination folder.
     """
 
-    def __init__(self, output_path=None, status_callback=None):
+    def __init__(self, output_path=None, status_callback=None, cancel_check=None):
         self.output_path = output_path or os.path.join(os.path.expanduser("~"), "Downloads")
         self.status_callback = status_callback or (lambda msg, pct=None: None)
+        self.cancel_check = cancel_check or (lambda: False)
         os.makedirs(self.output_path, exist_ok=True)
 
     def log(self, msg, pct=None):
         self.status_callback(msg, pct)
+
+    def cancelled(self):
+        try:
+            return bool(self.cancel_check())
+        except Exception:
+            return False
+
+    def _abort_if_cancelled(self):
+        if self.cancelled():
+            raise InterceptorCancelled("Stream capture cancelled by user.")
+
+    @staticmethod
+    def _unique_path(path):
+        """Never overwrite an existing file; auto-number (1), (2), ..."""
+        if not os.path.exists(path):
+            return path
+        base, ext = os.path.splitext(path)
+        counter = 1
+        while os.path.exists(f"{base} ({counter}){ext}"):
+            counter += 1
+        return f"{base} ({counter}){ext}"
 
     def bypass_and_extract(self, url, quality="4k", cookies_file=None):
         """
         Main entrypoint: Attempt bypass and stream sniffing.
         Returns a dict with media information and final filepath.
         """
+        self._abort_if_cancelled()
         self.log("Activating Stealth Stream Interceptor (bypassing anti-bot & locks)...", 5)
 
         # Stage 0: Platform-specific Course / Lecture Resolver
@@ -214,7 +248,7 @@ class StealthStreamInterceptor:
         # 2. Precision Video Stream Discovery
         clean_course = re.sub(r'[^a-zA-Z0-9\s]', ' ', course_title).strip()
         primary_course = " ".join(clean_course.split()[:4])
-        
+
         # Build search queries prioritizing full tutorials/lectures
         queries = [
             f'"{lecture_title}" "{primary_course}"',
@@ -245,7 +279,7 @@ class StealthStreamInterceptor:
             "review", "reviewed", "overview", "recap", "preview", "trailer", "teaser",
             "reaction", "clip", "promo", "breakdown", "summary", "short", "#shorts"
         )
-        
+
         valid_matches = []
         for c in candidates:
             ctitle = (c.get("title") or "").lower()
@@ -348,6 +382,9 @@ class StealthStreamInterceptor:
             "concurrent_fragment_downloads": 8,
             "retries": 12,
             "fragment_retries": 12,
+            "extractor_retries": 3,
+            "socket_timeout": 30,
+            "noprogress": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -464,7 +501,11 @@ class StealthStreamInterceptor:
             except Exception as e:
                 self.log(f"Navigation note: {e}", 55)
             finally:
-                browser.close()
+                for closer in (context.close, browser.close):
+                    try:
+                        closer()
+                    except Exception:
+                        pass
 
         if not captured_streams:
             try:
@@ -479,7 +520,10 @@ class StealthStreamInterceptor:
             )
 
         self.log(f"Intercepted {len(captured_streams)} stream candidate(s)!", 65)
-        best = captured_streams[0]
+        # Prefer adaptive manifests over whatever happened to load first - the
+        # first response is very often an ad or a preview segment.
+        priority = {"hls": 0, "dash": 1, "mp4": 2}
+        best = sorted(captured_streams, key=lambda s: priority.get(s["type"], 9))[0]
         stream_url = best["url"]
         stream_type = best["type"]
 
@@ -492,59 +536,87 @@ class StealthStreamInterceptor:
         else:
             return self._download_direct_file(stream_url, title=clean_title, quality=quality)
 
+    def _run_ffmpeg(self, cmd, timeout, out_file):
+        """Run FFmpeg, killing it on cancellation or timeout.
+
+        communicate(timeout=...) raises but leaves the child running; an
+        abandoned FFmpeg would keep writing to the user's disk indefinitely.
+        """
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("FFmpeg is required for stream capture but was not found on PATH.")
+        p = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        waited = 0.0
+        while True:
+            try:
+                _out, err = p.communicate(timeout=1)
+                return p.returncode, (err or b"").decode("utf-8", "replace")
+            except subprocess.TimeoutExpired:
+                waited += 1.0
+                if self.cancelled():
+                    self._kill(p)
+                    _remove_quietly(out_file)
+                    raise InterceptorCancelled("Stream capture cancelled by user.")
+                if waited > timeout:
+                    self._kill(p)
+                    _remove_quietly(out_file)
+                    raise RuntimeError(f"FFmpeg stream capture timed out after {int(timeout)}s.")
+
+    @staticmethod
+    def _kill(p):
+        try:
+            p.kill()
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
     def _download_stream_ffmpeg(self, stream_url, title="Downloaded_Stream", quality="4k"):
+        self._abort_if_cancelled()
         self.log("Capturing stream via high-speed FFmpeg reassembly...", 75)
-        out_name = f"{title}.mp4"
-        out_file = os.path.join(self.output_path, out_name)
+        out_file = self._unique_path(os.path.join(self.output_path, f"{title}.mp4"))
 
-        counter = 1
-        base, ext = os.path.splitext(out_file)
-        while os.path.exists(out_file):
-            out_file = f"{base} ({counter}){ext}"
-            counter += 1
-
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-y",
+        common = [
+            "ffmpeg", "-nostdin", "-y",
             "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
             "-fflags", "+genpts+discardcorrupt",
             "-avoid_negative_ts", "make_zero",
             "-i", stream_url,
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            "-movflags", "+faststart",
-            out_file
         ]
 
         try:
-            p = subprocess.Popen(
-                ffmpeg_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            rc, err = self._run_ffmpeg(
+                common + ["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", out_file],
+                timeout=900,
+                out_file=out_file,
             )
-            stdout, stderr = p.communicate(timeout=900)
-            
-            # Check if copy succeeded and produced a valid file
-            file_ok = (p.returncode == 0) and os.path.exists(out_file) and (os.path.getsize(out_file) > 200 * 1024)
+
+            file_ok = rc == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 200 * 1024
             if not file_ok:
-                self.log("Stream container copy produced unseekable file. Re-encoding cleanly with universal H.264...", 85)
-                # Universal fallback transcoding (guaranteed playable on all devices)
-                fallback_cmd = [
-                    "ffmpeg", "-y",
-                    "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
-                    "-fflags", "+genpts+discardcorrupt",
-                    "-avoid_negative_ts", "make_zero",
-                    "-i", stream_url,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                    out_file
-                ]
-                subprocess.run(fallback_cmd, check=True, timeout=600, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                self.log("Stream container copy produced an unusable file. Re-encoding to universal H.264...", 85)
+                _remove_quietly(out_file)
+                rc, err = self._run_ffmpeg(
+                    common + [
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                        out_file,
+                    ],
+                    timeout=1800,
+                    out_file=out_file,
+                )
+                if rc != 0:
+                    tail = " | ".join((err or "").strip().splitlines()[-4:])
+                    _remove_quietly(out_file)
+                    raise RuntimeError(f"FFmpeg re-encode failed: {tail}")
 
             if not os.path.exists(out_file) or os.path.getsize(out_file) < 20 * 1024:
+                _remove_quietly(out_file)
                 raise RuntimeError("FFmpeg stream capture generated an empty or corrupted file.")
 
             self.log(f"Stream saved cleanly: {os.path.basename(out_file)}", 100)
@@ -552,12 +624,41 @@ class StealthStreamInterceptor:
                 "title": title,
                 "filepath": out_file,
                 "filename": os.path.basename(out_file),
-                "url": stream_url
+                "url": stream_url,
+                "requested_downloads": [{"filepath": out_file}],
             }
+        except InterceptorCancelled:
+            raise
+        except RuntimeError:
+            raise
         except Exception as e:
+            _remove_quietly(out_file)
             raise RuntimeError(f"FFmpeg stream capture failed: {e}")
 
+    def _stream_to_file(self, url, headers, dest):
+        """Stream a URL to disk, aborting cleanly on cancellation."""
+        resp = _safe_cffi_get(url, headers=headers, stream=True, timeout=30)
+        resp.raise_for_status()
+        try:
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=262144):
+                    if self.cancelled():
+                        raise InterceptorCancelled("Download cancelled by user.")
+                    if chunk:
+                        f.write(chunk)
+        except BaseException:
+            # A partially written file is worse than none - it looks complete
+            # in the library and fails to play.
+            _remove_quietly(dest)
+            raise
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
     def _download_direct_file(self, file_url, title="Downloaded_Media", quality="4k"):
+        self._abort_if_cancelled()
         self.log("Downloading direct media stream file...", 80)
         quality = (quality or "4k").lower()
 
@@ -571,50 +672,38 @@ class StealthStreamInterceptor:
 
         safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Media_File"
         target_ext = "mp3" if quality == "audio" else ext
-        out_name = f"{safe_title}.{target_ext}"
-        out_file = os.path.join(self.output_path, out_name)
-
-        counter = 1
-        base, fext = os.path.splitext(out_file)
-        while os.path.exists(out_file):
-            out_file = f"{base} ({counter}){fext}"
-            counter += 1
+        out_file = self._unique_path(os.path.join(self.output_path, f"{safe_title}.{target_ext}"))
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*"
         }
 
-        # If audio conversion is required, stream to temp file first
+        # If audio conversion is required, stream to a temp file first.
         if quality == "audio" and ext != "mp3":
-            temp_stage = os.path.join(tempfile.gettempdir(), f"raw_{int(time.time())}.{ext}")
-            resp = _safe_cffi_get(file_url, headers=headers, stream=True)
-            resp.raise_for_status()
-            with open(temp_stage, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
-            # Transcode with FFmpeg
-            self.log("Transcoding media to studio MP3 320kbps...", 90)
-            transcode_cmd = [
-                "ffmpeg", "-y", "-i", temp_stage, "-vn",
-                "-codec:a", "libmp3lame", "-b:a", "320k",
-                out_file
-            ]
-            subprocess.run(transcode_cmd, check=True, timeout=600, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            temp_stage = os.path.join(
+                tempfile.gettempdir(), f"raw_{uuid.uuid4().hex[:10]}.{ext}"
+            )
             try:
-                os.remove(temp_stage)
-            except Exception:
-                pass
+                self._stream_to_file(file_url, headers, temp_stage)
+                self.log("Transcoding media to studio MP3 320kbps...", 90)
+                rc, err = self._run_ffmpeg(
+                    ["ffmpeg", "-nostdin", "-y", "-i", temp_stage, "-vn",
+                     "-codec:a", "libmp3lame", "-b:a", "320k", out_file],
+                    timeout=900,
+                    out_file=out_file,
+                )
+                if rc != 0:
+                    tail = " | ".join((err or "").strip().splitlines()[-4:])
+                    _remove_quietly(out_file)
+                    raise RuntimeError(f"Audio transcode failed: {tail}")
+            finally:
+                _remove_quietly(temp_stage)
         else:
-            resp = _safe_cffi_get(file_url, headers=headers, stream=True)
-            resp.raise_for_status()
-            with open(out_file, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
+            self._stream_to_file(file_url, headers, out_file)
 
         if not os.path.exists(out_file) or os.path.getsize(out_file) < 20 * 1024:
+            _remove_quietly(out_file)
             raise RuntimeError("Downloaded media file is empty or corrupted.")
 
         self.log(f"Saved: {os.path.basename(out_file)}", 100)

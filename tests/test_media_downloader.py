@@ -103,42 +103,51 @@ Language: en
 
     @patch("yt_dlp.YoutubeDL")
     def test_subtitle_isolation_preserves_user_files(self, mock_ydl):
-        """Verify subtitle downloading uses isolated staging and NEVER touches pre-existing .vtt files in output_path."""
+        """Subtitle extraction stages in a temp dir and NEVER touches pre-existing
+        .vtt files in the destination folder.
+
+        Updated for the two-pass extractor: pass 1 resolves which caption track
+        exists (download=False), pass 2 downloads only that track.
+        """
         with tempfile.TemporaryDirectory() as user_dir:
-            # Create a user .vtt file that must NOT be converted or deleted
+            # A user .vtt file that must not be converted or deleted.
             existing_user_vtt = os.path.join(user_dir, "my_existing_movie.vtt")
             with open(existing_user_vtt, "w", encoding="utf-8") as f:
                 f.write("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nKeep me safe!")
 
-            # Mock yt-dlp to place a downloaded vtt inside whatever outtmpl directory it is given
+            info = {
+                "title": "Sample Movie",
+                "subtitles": {"en": [{"url": "https://example.com/en.vtt", "ext": "vtt"}]},
+                "automatic_captions": {},
+            }
+
             def fake_extract_info(url, download=True):
+                if not download:
+                    return info
+                # Pass 2: drop a caption file wherever yt-dlp was told to stage.
                 args, kwargs = mock_ydl.call_args
                 opts = args[0] if args else kwargs.get("ydl_opts", {})
-                tmpl = opts.get("outtmpl", {})
-                tmpl_str = tmpl.get("default", "") if isinstance(tmpl, dict) else str(tmpl)
-                stage_dir = os.path.dirname(tmpl_str) or opts.get("paths", {}).get("home", "")
-                if os.path.exists(stage_dir):
-                    sub_vtt = os.path.join(stage_dir, "downloaded.en.vtt")
-                    with open(sub_vtt, "w", encoding="utf-8") as f:
+                stage_dir = (opts.get("paths") or {}).get("home", "")
+                if stage_dir and os.path.isdir(stage_dir):
+                    with open(os.path.join(stage_dir, "downloaded.en.vtt"), "w", encoding="utf-8") as f:
                         f.write("WEBVTT\n\n00:00:05.100 --> 00:00:09.200\nDownloaded caption")
-                return {"title": "Sample Movie"}
+                return info
 
             mock_instance = MagicMock()
             mock_instance.extract_info.side_effect = fake_extract_info
             mock_ydl.return_value.__enter__.return_value = mock_instance
 
-            # Execute subtitle extraction into user_dir
             res = extract_subtitles("https://www.youtube.com/watch?v=mock123", lang="en", output_path=user_dir)
             self.assertEqual(res["status"], "success")
+            self.assertEqual(res["track"], "en")
+            self.assertFalse(res["auto_generated"])
 
-            # Verify that user's pre-existing .vtt file STILL EXISTS untouched
+            # The user's pre-existing .vtt must still be there, untouched.
             self.assertTrue(os.path.exists(existing_user_vtt), "Pre-existing .vtt file was deleted!")
             with open(existing_user_vtt, "r", encoding="utf-8") as f:
                 self.assertIn("Keep me safe!", f.read())
 
-            # Verify newly converted .srt was moved to user_dir
-            user_files = os.listdir(user_dir)
-            srt_files = [f for f in user_files if f.endswith(".srt")]
+            srt_files = [f for f in os.listdir(user_dir) if f.endswith(".srt")]
             self.assertGreaterEqual(len(srt_files), 1)
 
     def test_audio_id3_tagging(self):

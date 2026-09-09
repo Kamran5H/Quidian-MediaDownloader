@@ -350,7 +350,15 @@
                                 <h3 id="pl-title" class="gradient-aurora" style="font-size: 1.25rem;">Playlist Title</h3>
                                 <p id="pl-meta" style="font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem;">0 items &bull; Creator</p>
                             </div>
-                            <button class="btn-action-glow" style="width: auto; padding: 0.6rem 1.2rem; font-size: 0.9rem;" onclick="downloadSelectedPlaylistItems()">Download Selected</button>
+                            <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap;">
+                                <select id="playlist-quality" class="glow-select" style="width: auto; min-width: 190px;" aria-label="Batch download quality">
+                                    <option value="1080p" selected>&#127916; Full HD 1080p (recommended)</option>
+                                    <option value="4k">&#9889; Best Available (up to 4K)</option>
+                                    <option value="720p">&#128241; High Definition 720p (faster)</option>
+                                    <option value="audio">&#127925; Audio only (MP3 320kbps)</option>
+                                </select>
+                                <button class="btn-action-glow" style="width: auto; padding: 0.6rem 1.2rem; font-size: 0.9rem;" onclick="downloadSelectedPlaylistItems()">Download Selected</button>
+                            </div>
                         </div>
 
                         <div class="playlist-table-container">

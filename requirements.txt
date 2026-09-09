@@ -1,7 +1,17 @@
+# Quidian - Media Downloader
+# Core runtime
 flask>=3.0.0
 yt-dlp>=2026.8.19
 requests>=2.31.0
-duckduckgo-search
+curl_cffi>=0.7.0
 gallery-dl>=1.27.0
 mutagen>=1.47.0
-curl_cffi>=0.7.0
+
+# Open-web search. `ddgs` is the current package; `duckduckgo-search` is its
+# deprecated predecessor and is still importable as a fallback.
+ddgs>=9.0.0
+
+# Optional: only needed by the Stealth Stream Interceptor's deep browser
+# sniffing path. Everything else works without it, and /api/health reports
+# whether it is present. After installing, run: python -m playwright install chromium
+playwright>=1.40.0

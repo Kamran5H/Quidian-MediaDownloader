@@ -11,16 +11,15 @@ warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", message=".*duckduckgo_search.*")
 
-import os
 import re
-import sys
 import math
 import html
 import json
 import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 def _clean_platform_search_query(query):
     """
@@ -127,6 +126,16 @@ def _norm_tokens(s):
     return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
 
 
+# Pre-compiled word-boundary matchers. Plain substring tests made short terms
+# like "amv" fire inside unrelated words and rejected legitimate results.
+_JUNK_RES = [(term, re.compile(r"\b" + re.escape(term) + r"\b")) for term in _JUNK_TERMS]
+
+
+def _junk_hits(title_lower, query_lower):
+    """Junk terms present in the title that the user did not ask for."""
+    return [t for t, rx in _JUNK_RES if rx.search(title_lower) and t not in query_lower]
+
+
 def _clean_platform_name(domain_or_source):
     """Format platform domain or slug into clean, human-readable name for UI badges."""
     if not domain_or_source:
@@ -205,11 +214,11 @@ def _score_entry(entry, query, intent):
     # recap, breakdown, trailer, teaser, or reaction!
     # -----------------------------------------------------------------------
     is_full_intent = intent in ("full_movie", "movie", "full_video")
+    junk_hits = _junk_hits(tl, q)
     if is_full_intent:
-        # Check against all commentary / review / trailer terms
-        for j in _JUNK_TERMS:
-            if j in tl and j.strip() not in q:
-                return -9999.0  # Immediate hard disqualification
+        # Commentary / review / trailer terms disqualify outright.
+        if junk_hits:
+            return -9999.0
 
         if ("trailer" in tl or "teaser" in tl) and "trailer" not in q and "teaser" not in q:
             return -9999.0  # Immediate hard disqualification
@@ -234,9 +243,7 @@ def _score_entry(entry, query, intent):
             score += 18
 
     # General junk penalty if not already disqualified
-    for j in _JUNK_TERMS:
-        if j in tl and j.strip() not in q:
-            score -= 35
+    score -= 35 * len(junk_hits)
 
     # Official / trusted source boosts
     STUDIO_KEYWORDS = ["yrf", "yash raj", "shemaroo", "ultra", "goldmines", "sony", "zee", "eros", "tips", "warner", "paramount", "universal", "lionsgate", "disney"]
@@ -551,7 +558,19 @@ def search_videos(query, count=8, provider="youtube", use_stealth=True):
         }))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [item for _s, item in scored[:int(count)]]
+
+    # The yt-dlp pass and the stealth HTML pass can surface the same video, and
+    # YouTube itself repeats items across sections.
+    unique, seen_ids = [], set()
+    for _s, item in scored:
+        key = item.get("id") or item.get("url")
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        unique.append(item)
+        if len(unique) >= int(count):
+            break
+    return unique
 
 
 def search_dailymotion(query, count=6, use_stealth=True):
@@ -651,7 +670,11 @@ def search_archive_org(query, count=4):
                 "id": ident,
                 "title": html.unescape(title),
                 "url": f"https://archive.org/details/{ident}",
-                "duration": 5400 if intent in ("movie", "full_movie") else None,
+                # Report the truth: the advanced-search API gives no runtime.
+                # A hard-coded 5400s used to show a fake "1:30:00" in the UI and
+                # fed a fabricated duration into the movie authenticity scorer.
+                "duration": None,
+                "longform_source": True,
                 "uploader": "Internet Archive",
                 "channel": "Internet Archive",
                 "thumbnail": f"https://archive.org/services/img/{ident}",
@@ -683,20 +706,36 @@ def _stealth_web_search(query, count=8):
         if resp.status_code != 200:
             return []
 
-        links = re.findall(r'<a class="result__url" href="([^"]+)".*?>(.*?)</a>', resp.text)
+        # DuckDuckGo's HTML endpoint puts the anchor text on its own line, so
+        # this pattern only ever matched with DOTALL enabled - without it the
+        # entire stealth web fallback silently returned nothing.
+        links = re.findall(
+            r'<a[^>]+class="result__(?:url|a)"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            resp.text,
+            re.S,
+        )
         results = []
+        seen_urls = set()
         for href, display in links:
-            clean_url = href.strip()
+            clean_url = html.unescape(href.strip())
+            if clean_url.startswith("//"):
+                clean_url = "https:" + clean_url
             # Resolve duckduckgo redirect url if needed
             if "uddg=" in clean_url:
                 parsed = urllib.parse.parse_qs(urllib.parse.urlparse(clean_url).query)
                 clean_url = parsed.get("uddg", [clean_url])[0]
 
-            title_clean = re.sub(r'<.*?>', '', display).strip()
+            if not clean_url.lower().startswith(("http://", "https://")):
+                continue
+            if clean_url in seen_urls:
+                continue
+            seen_urls.add(clean_url)
+
+            title_clean = html.unescape(re.sub(r'<.*?>', '', display)).strip()
             domain = urllib.parse.urlparse(clean_url).netloc.lower()
             if domain.startswith("www."):
                 domain = domain[4:]
-            if any(s in domain for s in _SKIP_HOSTS):
+            if not domain or any(s in domain for s in _SKIP_HOSTS):
                 continue
 
             results.append({
@@ -741,6 +780,11 @@ def search_web(query, count=8, use_stealth=True):
         stealth_results = _stealth_web_search(search_query, count=count)
         if stealth_results:
             return stealth_results
+
+    # Surface the real reason rather than discarding it. search_media() stores
+    # this as web_error and only shows it when nothing was found anywhere.
+    if not items and ddgs_error:
+        raise RuntimeError(f"Open-web search failed: {ddgs_error}")
 
     seen, cleaned = set(), []
     for url, title in items:
@@ -810,8 +854,8 @@ def search_imdb(query, count=3):
                 "imdb_id": imdb_id,
                 "title": f"{title} ({year})" if year else title,
                 "url": f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else f"https://www.imdb.com/find?q={urllib.parse.quote(query)}",
-                "duration": 7200,
-                "uploader": f"IMDb Official" + (f" - {cast}" if cast else ""),
+                "duration": None,
+                "uploader": "IMDb Official" + (f" - {cast}" if cast else ""),
                 "channel": "IMDb",
                 "thumbnail": img,
                 "view_count": None,
@@ -851,7 +895,9 @@ def search_streaming_platforms(query, imdb_items=None, count=2):
             top_cast = imdb_items[0].get("cast")
             top_year = imdb_items[0].get("year")
             top_title = imdb_items[0].get("title")
-            top_imdb_id = imdb_items[0].get("id")
+            # "id" falls back to a synthetic "imdb_<slug>" string; only a real
+            # tt-prefixed id is usable by the player, so read imdb_id directly.
+            top_imdb_id = imdb_items[0].get("imdb_id")
 
         results = []
         # Netflix Stream Card
@@ -860,7 +906,7 @@ def search_streaming_platforms(query, imdb_items=None, count=2):
             "imdb_id": top_imdb_id,
             "title": f"{top_title} (Watch on Netflix)",
             "url": f"https://www.netflix.com/search?q={encoded}",
-            "duration": 7200,
+            "duration": None,
             "uploader": "Netflix Official" + (f" - {top_cast}" if top_cast else ""),
             "channel": "Netflix",
             "thumbnail": top_thumb or "https://assets.nflxext.com/ffe/siteui/common/icons/monogram/icon-512.png",
@@ -880,7 +926,7 @@ def search_streaming_platforms(query, imdb_items=None, count=2):
             "imdb_id": top_imdb_id,
             "title": f"{top_title} (Watch on Prime Video)",
             "url": f"https://www.primevideo.com/search/ref=atv_nb_sr?phrase={encoded}",
-            "duration": 7200,
+            "duration": None,
             "uploader": "Prime Video" + (f" - {top_cast}" if top_cast else ""),
             "channel": "Amazon Prime",
             "thumbnail": top_thumb or "https://m.media-amazon.com/images/G/01/digital/video/web/logo-min-remake.png",
@@ -916,39 +962,44 @@ def search_media(query, count=16, include_web=True, use_stealth=True):
     yt_error = None
     web_error = None
 
-    # Step 1: Run searches across all platforms concurrently
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # Step 1: Run searches across all platforms concurrently.
+    #
+    # NOTE: this deliberately does NOT use `with ThreadPoolExecutor(...)`.
+    # Leaving that context manager calls shutdown(wait=True), which blocks until
+    # every future finishes - so a slow provider hung the whole request and made
+    # the per-future timeouts below completely ineffective.
+    executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="quidian-search")
+    try:
         future_yt = executor.submit(search_videos, query, count=8, provider="youtube", use_stealth=use_stealth)
         future_dm = executor.submit(search_dailymotion, query, count=5, use_stealth=use_stealth)
         future_arch = executor.submit(search_archive_org, query, count=4)
         future_imdb = executor.submit(search_imdb, search_q, count=3)
-        future_web = executor.submit(search_web, query, count=5, use_stealth=use_stealth)
+        future_web = executor.submit(search_web, query, count=5, use_stealth=use_stealth) if include_web else None
 
-        try:
-            yt_results = future_yt.result(timeout=10)
-        except Exception as e:
-            yt_error = str(e)
+        deadline = time.monotonic() + 12.0
 
-        try:
-            dm_results = future_dm.result(timeout=7)
-        except Exception:
-            dm_results = []
+        def _collect(future, fallback):
+            """Read a future within the shared deadline, never blocking past it."""
+            if future is None:
+                return fallback, None
+            remaining = max(0.5, deadline - time.monotonic())
+            try:
+                value = future.result(timeout=remaining)
+                return (value if value is not None else fallback), None
+            except FuturesTimeout:
+                future.cancel()
+                return fallback, "timed out"
+            except Exception as exc:
+                return fallback, str(exc)
 
-        try:
-            arch_results = future_arch.result(timeout=7)
-        except Exception:
-            arch_results = []
-
-        try:
-            imdb_results = future_imdb.result(timeout=6)
-        except Exception:
-            imdb_results = []
-
-        try:
-            web_results = future_web.result(timeout=8)
-        except Exception as e:
-            web_error = str(e)
-            web_results = []
+        yt_results, yt_error = _collect(future_yt, [])
+        dm_results, _ = _collect(future_dm, [])
+        arch_results, _ = _collect(future_arch, [])
+        imdb_results, _ = _collect(future_imdb, [])
+        web_results, web_error = _collect(future_web, [])
+    finally:
+        # Abandon any straggler threads instead of waiting on them.
+        executor.shutdown(wait=False)
 
     # Step 2: Generate streaming platform availability cards (Netflix & Prime Video)
     streaming_results = search_streaming_platforms(query, imdb_items=imdb_results, count=2)
@@ -1005,17 +1056,20 @@ def search_media(query, count=16, include_web=True, use_stealth=True):
         _add_items(arch_results[1:])
     if imdb_results:
         _add_items(imdb_results[1:])
-    if web_results:
+    if include_web and web_results:
         _add_items(web_results)
 
-    # Platform counts for the UI filter chips
+    visible = combined[:int(count)] if count else combined
+
+    # Counts are computed over the results actually returned, so the filter
+    # chips can never advertise more items than the grid contains.
     platform_counts = {}
-    for it in combined:
+    for it in visible:
         p = it.get("platform") or "Web"
         platform_counts[p] = platform_counts.get(p, 0) + 1
 
     return {
-        "results": combined[:int(count)] if count else combined,
+        "results": visible,
         "total_found": len(combined),
         "platform_counts": platform_counts,
         "query": query,

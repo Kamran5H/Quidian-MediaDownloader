@@ -179,6 +179,19 @@ function switchModule(moduleId, btnElement) {
     }
 }
 
+/** Stop every per-card progress timer (called on new search / teardown). */
+function clearSearchCardTimers() {
+    for (const [, entry] of searchCardJobMap.entries()) {
+        if (entry && entry.timer) clearInterval(entry.timer);
+    }
+    searchCardJobMap.clear();
+}
+
+window.addEventListener("beforeunload", () => {
+    clearSearchCardTimers();
+    if (activeProgressTimer) clearInterval(activeProgressTimer);
+});
+
 function switchInnerTab(e, tabId) {
     document.querySelectorAll(".inner-tab-btn").forEach(b => b.classList.remove("active"));
     document.querySelectorAll(".inner-tab-content").forEach(c => c.classList.remove("active"));
@@ -344,12 +357,16 @@ function cancelLinkJob() {
 
     fetch(`/api/cancel/${activeLinkJobId}`, { method: "POST" })
         .then(() => {
-            if (activeProgressTimer) clearInterval(activeProgressTimer);
+            if (activeProgressTimer) {
+                clearInterval(activeProgressTimer);
+                activeProgressTimer = null;
+            }
             const statusBox = document.getElementById("link-status");
             const btn = document.getElementById("btn-download-video");
             setBtnLoading(btn, false);
             showStatus(statusBox, "Download cancelled by user.", "info");
-            document.getElementById("link-progress-title").textContent = "Cancelled";
+            const progTitle = document.getElementById("link-progress-title");
+            if (progTitle) progTitle.textContent = "Cancelled";
         })
         .catch(console.error);
 }
@@ -364,42 +381,64 @@ function pollJobProgress(jobId, onComplete) {
     const etaEl = document.getElementById("stat-eta");
     const phaseEl = document.getElementById("stat-phase");
 
+    let missCount = 0;
+    const stop = () => {
+        clearInterval(activeProgressTimer);
+        activeProgressTimer = null;
+    };
+
     activeProgressTimer = setInterval(async () => {
+        let data;
         try {
             const res = await fetch(`/api/progress/${jobId}`);
-            const data = await res.json();
-
-            if (data.status === "downloading") {
-                const pct = Math.min(100, Math.max(0, data.percent || 0)).toFixed(0);
-                if (fillEl) fillEl.style.width = `${pct}%`;
-                if (pctEl) pctEl.textContent = `${pct}%`;
-                if (titleEl && data.title) titleEl.textContent = data.title;
-                if (speedEl) speedEl.textContent = data.speed ? `⚡ ${data.speed}` : "⚡ Accelerating";
-                if (etaEl) etaEl.textContent = data.eta ? `⏱ ETA ${formatDuration(data.eta)}` : "⏱ Estimating";
-                if (phaseEl) phaseEl.textContent = data.phase ? `📦 ${data.phase}` : "📦 Stream active";
-            } else if (data.status === "processing") {
-                if (fillEl) fillEl.style.width = "98%";
-                if (pctEl) pctEl.textContent = "98%";
-                if (phaseEl) phaseEl.textContent = "⚙️ Merging streams / MP3 conversion";
-                if (titleEl && data.title) titleEl.textContent = data.title;
-            } else if (data.status === "done") {
-                clearInterval(activeProgressTimer);
-                if (fillEl) fillEl.style.width = "100%";
-                if (pctEl) pctEl.textContent = "100%";
-                if (phaseEl) phaseEl.textContent = "✅ Complete";
-                if (titleEl && data.title) titleEl.textContent = data.title;
-                if (onComplete) onComplete("done", data);
-            } else if (data.status === "error") {
-                clearInterval(activeProgressTimer);
-                if (phaseEl) phaseEl.textContent = "❌ Failed";
-                if (onComplete) onComplete("error", data);
-            } else if (data.status === "cancelled") {
-                clearInterval(activeProgressTimer);
-                if (phaseEl) phaseEl.textContent = "⏹ Cancelled";
-                if (onComplete) onComplete("cancelled", data);
+            data = await res.json().catch(() => null);
+            if (res.status === 404 || (data && data.status === "expired")) {
+                // The job record has aged out of the registry - nothing more
+                // will ever arrive, so stop rather than polling forever.
+                stop();
+                if (phaseEl) phaseEl.textContent = "\u23F3 Job expired";
+                if (onComplete) onComplete("error", { error: "This job is no longer being tracked." });
+                return;
             }
+            if (!data) throw new Error("bad payload");
+            missCount = 0;
         } catch {
-            // Keep polling on transient network hiccup
+            if (++missCount >= 20) {
+                stop();
+                if (phaseEl) phaseEl.textContent = "\u274C Connection lost";
+                if (onComplete) onComplete("error", { error: "Lost contact with the local server." });
+            }
+            return;
+        }
+
+        if (data.status === "downloading") {
+            const pct = Math.min(100, Math.max(0, data.percent || 0)).toFixed(0);
+            if (fillEl) fillEl.style.width = `${pct}%`;
+            if (pctEl) pctEl.textContent = `${pct}%`;
+            if (titleEl && data.title) titleEl.textContent = data.title;
+            if (speedEl) speedEl.textContent = data.speed ? `\u26A1 ${data.speed}` : "\u26A1 Accelerating";
+            if (etaEl) etaEl.textContent = data.eta ? `\u23F1 ETA ${formatDuration(data.eta)}` : "\u23F1 Estimating";
+            if (phaseEl) phaseEl.textContent = data.phase ? `\uD83D\uDCE6 ${data.phase}` : "\uD83D\uDCE6 Stream active";
+        } else if (data.status === "processing") {
+            if (fillEl) fillEl.style.width = "98%";
+            if (pctEl) pctEl.textContent = "98%";
+            if (phaseEl) phaseEl.textContent = "\u2699\uFE0F Merging streams / converting";
+            if (titleEl && data.title) titleEl.textContent = data.title;
+        } else if (data.status === "done") {
+            stop();
+            if (fillEl) fillEl.style.width = "100%";
+            if (pctEl) pctEl.textContent = "100%";
+            if (phaseEl) phaseEl.textContent = "\u2705 Complete";
+            if (titleEl && data.title) titleEl.textContent = data.title;
+            if (onComplete) onComplete("done", data);
+        } else if (data.status === "error") {
+            stop();
+            if (phaseEl) phaseEl.textContent = "\u274C Failed";
+            if (onComplete) onComplete("error", data);
+        } else if (data.status === "cancelled") {
+            stop();
+            if (phaseEl) phaseEl.textContent = "\u23F9 Cancelled";
+            if (onComplete) onComplete("cancelled", data);
         }
     }, 600);
 }
@@ -452,10 +491,7 @@ async function runSearch() {
     const useStealth = stealthToggle ? stealthToggle.checked : true;
 
     // Clean up any lingering card timers from previous searches
-    for (const [, entry] of searchCardJobMap.entries()) {
-        if (entry && entry.timer) clearInterval(entry.timer);
-    }
-    searchCardJobMap.clear();
+    clearSearchCardTimers();
 
     setBtnLoading(btn, true);
     if (resultsGrid) resultsGrid.innerHTML = "";
@@ -497,18 +533,32 @@ function fmtViews(n) {
     return n + " views";
 }
 
-async function downloadBestMatch() {
-    const grid = document.getElementById("search-results");
-    const firstBtn = grid && grid.querySelector(".btn-card-action:not(.stream-action)");
-    if (firstBtn) { firstBtn.click(); firstBtn.scrollIntoView({ behavior: "smooth", block: "center" }); }
+// Set by renderSearchResults so "Download Best Match" always targets the top
+// *playable* result. It used to grab the first .btn-card-action in the DOM,
+// which is the "Play (No Login)" button whenever the top card is a stream card.
+let topPlayableDownloadBtn = null;
+
+function downloadBestMatch() {
+    if (!topPlayableDownloadBtn || !document.body.contains(topPlayableDownloadBtn)) {
+        showStatus(document.getElementById("search-status"),
+            "No downloadable result in the current list - try a different query.", "info");
+        return;
+    }
+    topPlayableDownloadBtn.click();
+    topPlayableDownloadBtn.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
-function openStreamingPlatform(encodedUrl, platformName) {
-    const url = decodeURIComponent(encodedUrl);
-    window.open(url, "_blank");
+function openStreamingPlatform(url, platformName) {
+    const opened = openExternal(url);
     const statusBox = document.getElementById("search-status");
-    if (statusBox) {
-        showStatus(statusBox, `✨ Opened ${platformName} in browser. Note: Streaming services use DRM protection. For an offline video download, click "Download" on any YouTube, Dailymotion, or Archive.org card!`, "info");
+    if (!statusBox) return;
+    if (opened) {
+        showStatus(statusBox,
+            `Opened ${platformName} in a new tab. Streaming services use DRM, so for an offline copy ` +
+            `use the Download button on a YouTube, Dailymotion or Archive.org card.`, "info");
+    } else {
+        showStatus(statusBox,
+            `Could not open ${platformName} - your browser blocked the new tab.`, "error");
     }
 }
 
@@ -516,167 +566,247 @@ function filterResultsByPlatform(platform, chipEl) {
     document.querySelectorAll(".platform-filter-chip").forEach(c => c.classList.remove("active"));
     if (chipEl) chipEl.classList.add("active");
 
-    const cards = document.querySelectorAll(".media-result-card");
-    cards.forEach(c => {
+    const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const target = norm(platform);
+    document.querySelectorAll(".media-result-card").forEach(c => {
         if (platform === "all") {
             c.style.display = "";
-        } else {
-            const cp = (c.getAttribute("data-platform") || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-            const target = platform.toLowerCase().replace(/[^a-z0-9]/g, "");
-            c.style.display = (cp === target || cp.includes(target) || target.includes(cp)) ? "" : "none";
+            return;
         }
+        const cp = norm(c.dataset.platform);
+        c.style.display = (cp === target || cp.includes(target) || target.includes(cp)) ? "" : "none";
     });
+}
+
+function buildPlatformFilterBar(counts, totalShown) {
+    const bar = el("div", "platform-filter-bar");
+    bar.appendChild(el("span", "platform-filter-label", "Sources:"));
+
+    const makeChip = (label, count, value, active) => {
+        const btn = el("button", "platform-filter-chip" + (active ? " active" : ""));
+        btn.type = "button";
+        btn.appendChild(document.createTextNode(label + " "));
+        btn.appendChild(el("span", "chip-count", count));
+        // Listener + dataset instead of an inline onclick string: a platform
+        // name containing a quote used to break out of the handler attribute.
+        btn.dataset.platform = value;
+        btn.addEventListener("click", () => filterResultsByPlatform(value, btn));
+        return btn;
+    };
+
+    bar.appendChild(makeChip("All Sources", totalShown, "all", true));
+    Object.keys(counts).forEach(p => bar.appendChild(makeChip(p, counts[p], p, false)));
+    return bar;
+}
+
+function buildResultCard(item, idx) {
+    const isWeb = item.source === "web";
+    const platform = item.platform || (item.source === "youtube" ? "YouTube"
+        : (item.source === "dailymotion" ? "Dailymotion"
+            : (item.source === "archive" ? "Archive.org" : (item.uploader || "Web"))));
+    const platformClass = String(platform).toLowerCase().replace(/[^a-z0-9]/g, "");
+    const isStreaming = !!item.is_streaming || ["netflix", "primevideo", "prime", "imdb"].includes(platformClass);
+    const dur = (isWeb || isStreaming) ? "" : formatDuration(item.duration);
+    const views = fmtViews(item.view_count);
+    const isFullMovie = (item.duration && item.duration >= 2400) || item.badge === "Full Movie" || item.badge === "Archive Movie";
+    const isFullVideo = !isFullMovie && ((item.duration && item.duration >= 1200) || item.badge === "Full Video");
+
+    const card = el("div", "media-result-card" + (idx === 0 ? " top-pick" : ""));
+    card.id = `media-card-${idx}`;
+    card.dataset.platform = platform;
+
+    // ---- thumbnail -------------------------------------------------------
+    const thumb = el("div", "media-thumb");
+    const thumbUrl = safeHttpUrl(item.thumbnail);
+    if (thumbUrl) {
+        const img = document.createElement("img");
+        img.alt = "Thumbnail";
+        img.loading = "lazy";
+        img.referrerPolicy = "no-referrer";
+        img.addEventListener("error", () => {
+            img.remove();
+            thumb.prepend(el("div", "media-thumb-fallback", isStreaming ? "STREAM" : "\u25B6"));
+        }, { once: true });
+        img.src = thumbUrl;   // assigned as a property, never interpolated into HTML
+        thumb.appendChild(img);
+    } else {
+        thumb.appendChild(el("div", "media-thumb-fallback", isStreaming ? "STREAM" : (isWeb ? "WEB" : "\u25B6")));
+    }
+    if (dur && dur !== "--:--") thumb.appendChild(el("span", "media-dur", dur));
+    if (idx === 0) thumb.appendChild(el("span", "top-pick-flag", "TOP PICK"));
+    card.appendChild(thumb);
+
+    // ---- meta ------------------------------------------------------------
+    const meta = el("div", "media-meta");
+    const titleEl = el("div", "media-title", item.title || "Untitled");
+    titleEl.title = item.title || "";
+    meta.appendChild(titleEl);
+
+    const uploaderRow = el("div", "media-uploader");
+    if (isFullMovie) {
+        uploaderRow.appendChild(el("span", "full-movie-badge", "\uD83C\uDFAC Full Movie"));
+    } else if (isFullVideo) {
+        const b = el("span", "full-movie-badge", "\u23F1 Full Video");
+        b.style.background = "rgba(99,102,241,0.2)";
+        b.style.borderColor = "rgba(99,102,241,0.4)";
+        b.style.color = "#a5b4fc";
+        uploaderRow.appendChild(b);
+    }
+    if (item.badge && !["Full Movie", "Full Video", "Archive Movie"].includes(item.badge)) {
+        uploaderRow.appendChild(el("span", "official-badge", item.badge));
+    }
+    if (item.stealth_protected) {
+        const s = el("span", "official-badge", "\uD83D\uDEE1 Stealth");
+        s.style.background = "rgba(168, 85, 247, 0.2)";
+        s.style.color = "#c084fc";
+        s.style.border = "1px solid rgba(168, 85, 247, 0.4)";
+        uploaderRow.appendChild(s);
+    }
+    uploaderRow.appendChild(el("span", "uploader-name", item.uploader || item.channel || "Official"));
+
+    let metaSubtitle = "";
+    if (item.year) metaSubtitle = String(item.year);
+    else if (views) metaSubtitle = views;
+    else if (isStreaming) metaSubtitle = "Streaming";
+    if (metaSubtitle) uploaderRow.appendChild(el("span", "view-count", "\u2022 " + metaSubtitle));
+
+    uploaderRow.appendChild(el("span", `platform-source-tag ${platformClass}`, "\u2022 " + platform));
+    meta.appendChild(uploaderRow);
+    card.appendChild(meta);
+
+    // ---- actions ---------------------------------------------------------
+    const actionWrap = el("div", "media-action");
+    let downloadBtn;
+    if (isStreaming) {
+        const group = el("div", "media-action-group");
+        const cleanTitle = String(item.title || "").replace(/\s*\((Watch on|IMDb|Netflix|Prime).*?\)/gi, "").trim();
+
+        const playBtn = el("button", "btn-card-action play-action", "\u25B6 Play (No Login)");
+        playBtn.type = "button";
+        playBtn.addEventListener("click", () => playDirectly(cleanTitle, item.imdb_id || "", platformClass, item.url));
+        group.appendChild(playBtn);
+
+        downloadBtn = el("button", "btn-card-action", "\u26A1 Download");
+        downloadBtn.type = "button";
+        downloadBtn.id = `btn-result-${idx}`;
+        group.appendChild(downloadBtn);
+        actionWrap.appendChild(group);
+    } else {
+        downloadBtn = el("button", "btn-card-action", "Download");
+        downloadBtn.type = "button";
+        downloadBtn.id = `btn-result-${idx}`;
+        actionWrap.appendChild(downloadBtn);
+    }
+    downloadBtn.addEventListener("click", () => downloadSearchResult(item.url, idx));
+    card.appendChild(actionWrap);
+
+    // ---- inline progress slot -------------------------------------------
+    const slot = el("div", "card-progress-slot hidden");
+    slot.id = `card-prog-${idx}`;
+    const track = el("div", "progress-track");
+    track.style.marginTop = "0.5rem";
+    const fill = el("div", "progress-bar-fill");
+    fill.id = `card-fill-${idx}`;
+    track.appendChild(fill);
+    slot.appendChild(track);
+    const progMeta = el("div", "card-prog-meta");
+    const pct = el("span", "card-pct", "0%");
+    pct.id = `card-pct-${idx}`;
+    const spd = el("span", "card-speed");
+    spd.id = `card-speed-${idx}`;
+    progMeta.appendChild(pct);
+    progMeta.appendChild(spd);
+    slot.appendChild(progMeta);
+    card.appendChild(slot);
+
+    return { card, downloadBtn, isStreaming };
 }
 
 function renderSearchResults(items, cleanedQuery, originalQuery, platformCounts) {
     const grid = document.getElementById("search-results");
     if (!grid) return;
     grid.innerHTML = "";
+    topPlayableDownloadBtn = null;
 
-    // Platform clean notice if user searched "movie from Netflix / Prime"
-    if (cleanedQuery && originalQuery && cleanedQuery.trim().toLowerCase() !== originalQuery.trim().toLowerCase()) {
-        const cleanBar = document.createElement("div");
-        cleanBar.className = "search-cleaning-notice";
-        cleanBar.innerHTML = `
-            <span>✨ Platform filter detected: searching for <strong>"${escapeHtml(cleanedQuery)}"</strong> across all sources simultaneously.</span>
-        `;
-        grid.appendChild(cleanBar);
-    }
-
-    // Multi-source Interactive Platform Filter Bar
-    const counts = platformCounts || {};
-    const platformKeys = Object.keys(counts);
-    if (platformKeys.length > 1) {
-        const filterBar = document.createElement("div");
-        filterBar.className = "platform-filter-bar";
-        
-        let chipsHtml = `
-            <span class="platform-filter-label">Sources:</span>
-            <button type="button" class="platform-filter-chip active" onclick="filterResultsByPlatform('all', this)">
-                All Sources <span class="chip-count">${items.length}</span>
-            </button>
-        `;
-        platformKeys.forEach(p => {
-            chipsHtml += `
-                <button type="button" class="platform-filter-chip" onclick="filterResultsByPlatform('${escapeHtml(p)}', this)">
-                    ${escapeHtml(p)} <span class="chip-count">${counts[p]}</span>
-                </button>
-            `;
-        });
-        filterBar.innerHTML = chipsHtml;
-        grid.appendChild(filterBar);
-    }
-
-    // One-click "best match" bar (auto-downloads top playable result)
-    const playableItems = items.filter(it => !it.is_streaming);
-    if (playableItems.length > 0) {
-        const topPlayable = playableItems[0];
-        const bar = document.createElement("div");
-        bar.className = "best-match-bar";
-        bar.innerHTML = `
-            <div class="best-match-info">
-                <span class="best-match-star">⚡</span>
-                <span>Top Playable Match: <strong>${escapeHtml((topPlayable.title || '').slice(0, 55))}</strong> (${escapeHtml(topPlayable.platform || 'Direct')})</span>
-            </div>
-            <button class="btn-best-match" onclick="downloadBestMatch()">Download Best Match</button>
-        `;
+    if (cleanedQuery && originalQuery &&
+        cleanedQuery.trim().toLowerCase() !== originalQuery.trim().toLowerCase()) {
+        const bar = el("div", "search-cleaning-notice");
+        bar.appendChild(el("span", null,
+            `Platform filter detected: searching for "${cleanedQuery}" across all sources simultaneously.`));
         grid.appendChild(bar);
     }
 
-    items.forEach((item, idx) => {
-        const isWeb = item.source === "web";
-        const dur = (isWeb || item.is_streaming) ? "" : formatDuration(item.duration);
-        const views = fmtViews(item.view_count);
-        const badge = item.badge;
-        const platform = item.platform || (item.source === "youtube" ? "YouTube" : (item.source === "dailymotion" ? "Dailymotion" : (item.source === "archive" ? "Archive.org" : (item.uploader || "Web"))));
-        const platformClass = platform.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const isFullMovie = (item.duration && item.duration >= 2400) || item.badge === "Full Movie" || item.badge === "Archive Movie";
-        const isFullVideo = !isFullMovie && ((item.duration && item.duration >= 1200) || item.badge === "Full Video");
-        const isStreaming = item.is_streaming || ["netflix", "primevideo", "prime", "imdb"].includes(platformClass);
+    const counts = platformCounts || {};
+    if (Object.keys(counts).length > 1) {
+        grid.appendChild(buildPlatformFilterBar(counts, items.length));
+    }
 
-        // Subtitle line (year/views/channel)
-        let metaSubtitle = "";
-        if (item.year) {
-            metaSubtitle = `${item.year}`;
-        } else if (views) {
-            metaSubtitle = `${views}`;
-        } else if (isStreaming) {
-            metaSubtitle = `Streaming`;
-        }
-
-        const card = document.createElement("div");
-        card.className = "media-result-card" + (idx === 0 ? " top-pick" : "");
-        card.id = `media-card-${idx}`;
-        card.setAttribute("data-platform", platform);
-
-        const thumbInner = item.thumbnail
-            ? `<img src="${item.thumbnail}" alt="Thumbnail" loading="lazy" onerror="this.onerror=null;this.parentElement.innerHTML='<div class=\\'media-thumb-fallback\\'>${isStreaming ? 'STREAM' : '▶'}</div>'">`
-            : `<div class="media-thumb-fallback">${isStreaming ? 'STREAM' : (isWeb ? 'WEB' : '▶')}</div>`;
-
-        // Action button based on platform
-        let actionBtnHtml = "";
-        if (isStreaming) {
-            const cleanTitle = (item.title || "").replace(/\s*\((Watch on|IMDb|Netflix|Prime).*?\)/gi, "").trim();
-            const encTitle = encodeURIComponent(cleanTitle);
-            const encImdb = encodeURIComponent(item.imdb_id || "");
-            actionBtnHtml = `
-                <div class="media-action-group">
-                    <button type="button" class="btn-card-action play-action" onclick="playDirectly(decodeURIComponent('${encTitle}'), decodeURIComponent('${encImdb}'), '${platformClass}', '${encodeURIComponent(item.url)}')">▶ Play (No Login)</button>
-                    <button type="button" class="btn-card-action" id="btn-result-${idx}" onclick="downloadSearchResult('${encodeURIComponent(item.url)}', ${idx})">⚡ Download</button>
-                </div>
-            `;
-        } else {
-            actionBtnHtml = `<button type="button" class="btn-card-action" id="btn-result-${idx}" onclick="downloadSearchResult('${encodeURIComponent(item.url)}', ${idx})">Download</button>`;
-        }
-
-        card.innerHTML = `
-            <div class="media-thumb">
-                ${thumbInner}
-                ${dur ? `<span class="media-dur">${dur}</span>` : ''}
-                ${idx === 0 ? `<span class="top-pick-flag">TOP&nbsp;PICK</span>` : ''}
-            </div>
-            <div class="media-meta">
-                <div class="media-title" title="${escapeHtml(item.title || '')}">${escapeHtml(item.title || 'Untitled')}</div>
-                <div class="media-uploader">
-                    ${isFullMovie ? `<span class="full-movie-badge">🎬 Full Movie</span>` : (isFullVideo ? `<span class="full-movie-badge" style="background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.4); color: #a5b4fc;">⏱ Full Video</span>` : '')}
-                    ${badge && badge !== 'Full Movie' && badge !== 'Full Video' && badge !== 'Archive Movie' ? `<span class="official-badge">${escapeHtml(badge)}</span>` : ''}
-                    ${item.stealth_protected ? `<span class="official-badge" style="background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4);">🛡️ Stealth</span>` : ''}
-                    <span class="uploader-name">${escapeHtml(item.uploader || item.channel || 'Official')}</span>
-                    ${metaSubtitle ? `<span class="view-count">• ${escapeHtml(metaSubtitle)}</span>` : ''}
-                    <span class="platform-source-tag ${platformClass}">• ${escapeHtml(platform)}</span>
-                </div>
-            </div>
-            <div class="media-action">
-                ${actionBtnHtml}
-            </div>
-            <div class="card-progress-slot hidden" id="card-prog-${idx}">
-                <div class="progress-track" style="margin-top: 0.5rem;">
-                    <div class="progress-bar-fill" id="card-fill-${idx}"></div>
-                </div>
-                <div class="card-prog-meta">
-                    <span class="card-pct" id="card-pct-${idx}">0%</span>
-                    <span class="card-speed" id="card-speed-${idx}"></span>
-                </div>
-            </div>
-        `;
-        grid.appendChild(card);
+    const built = items.map((item, idx) => {
+        const b = buildResultCard(item, idx);
+        return b;
     });
+
+    // "Best match" bar needs the button reference, so build it after the cards.
+    const firstPlayable = built.find(b => !b.isStreaming);
+    if (firstPlayable) {
+        topPlayableDownloadBtn = firstPlayable.downloadBtn;
+        const topItem = items[built.indexOf(firstPlayable)];
+        const bar = el("div", "best-match-bar");
+        const info = el("div", "best-match-info");
+        info.appendChild(el("span", "best-match-star", "\u26A1"));
+        const label = el("span");
+        label.appendChild(document.createTextNode("Top Playable Match: "));
+        label.appendChild(el("strong", null, String(topItem.title || "").slice(0, 55)));
+        label.appendChild(document.createTextNode(` (${topItem.platform || "Direct"})`));
+        info.appendChild(label);
+        bar.appendChild(info);
+        const btn = el("button", "btn-best-match", "Download Best Match");
+        btn.type = "button";
+        btn.addEventListener("click", downloadBestMatch);
+        bar.appendChild(btn);
+        grid.appendChild(bar);
+    }
+
+    built.forEach(b => grid.appendChild(b.card));
 }
 
 function escapeHtml(s) {
-    return (s || "").replace(/[&<>"']/g, c => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    return String(s == null ? "" : s).replace(/[&<>"'`=\/]/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        "`": "&#96;", "=": "&#61;", "/": "&#47;"
     }[c]));
 }
 
-function downloadSearchResult(encodedUrl, idx) {
+/**
+ * Only http(s) URLs are ever assigned to an <img src> or opened in a tab.
+ * Search results come from third-party engines, so a javascript:/data: URL
+ * must never reach the DOM.
+ */
+function safeHttpUrl(u) {
+    if (typeof u !== "string" || !u) return "";
+    try {
+        const parsed = new URL(u, window.location.origin);
+        return (parsed.protocol === "http:" || parsed.protocol === "https:") ? parsed.href : "";
+    } catch {
+        return "";
+    }
+}
+
+/** Create an element with text content - never HTML - plus optional props. */
+function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = String(text);
+    return node;
+}
+
+function downloadSearchResult(url, idx) {
     requestDownloadWithDestination((chosenPath) => {
-        executeDownloadSearchResult(encodedUrl, idx, chosenPath);
+        executeDownloadSearchResult(url, idx, chosenPath);
     });
 }
 
-async function executeDownloadSearchResult(encodedUrl, idx, outputPath) {
-    const url = decodeURIComponent(encodedUrl);
+async function executeDownloadSearchResult(url, idx, outputPath) {
     const quality = document.getElementById("search-quality")?.value || "4k";
     const turboToggle = document.getElementById("search-turbo-toggle");
     const stealthToggle = document.getElementById("search-stealth-toggle");
@@ -689,6 +819,10 @@ async function executeDownloadSearchResult(encodedUrl, idx, outputPath) {
     const pctEl = document.getElementById(`card-pct-${idx}`);
     const speedElC = document.getElementById(`card-speed-${idx}`);
 
+    // Clear any timer still attached to this card from a previous attempt.
+    const prior = searchCardJobMap.get(idx);
+    if (prior && prior.timer) clearInterval(prior.timer);
+
     if (btn) {
         btn.textContent = useStealth ? "Bypassing locks..." : "Connecting...";
         btn.disabled = true;
@@ -696,101 +830,122 @@ async function executeDownloadSearchResult(encodedUrl, idx, outputPath) {
     if (progSlot) progSlot.classList.remove("hidden");
     if (pctEl) pctEl.textContent = "0%";
 
+    const resetToDownload = (label) => {
+        if (!btn) return;
+        btn.textContent = label;
+        btn.className = "btn-card-action";
+        btn.disabled = false;
+        btn.onclick = null;
+        btn.replaceWith(btn.cloneNode(true));
+        const fresh = document.getElementById(`btn-result-${idx}`);
+        if (fresh) fresh.addEventListener("click", () => downloadSearchResult(url, idx));
+    };
+
     try {
         const res = await fetch("/api/download_video", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                url,
-                quality,
-                use_turbo: useTurbo,
-                use_stealth: useStealth,
-                output_path: outputPath
-            })
+            body: JSON.stringify({ url, quality, use_turbo: useTurbo, use_stealth: useStealth, output_path: outputPath })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
 
-        if (res.ok && data.job_id) {
-            const jobId = data.job_id;
-            const cardEl = document.getElementById(`media-card-${idx}`);
-            if (cardEl) cardEl.dataset.activeJobId = jobId;
+        if (!res.ok || !data.job_id) {
+            if (btn) { btn.textContent = "Error"; btn.disabled = true; }
+            showStatus(document.getElementById("search-status"),
+                data.error || "Could not start that download.", "error");
+            return;
+        }
 
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = "Cancel";
-                btn.classList.add("cancel-mode");
-                btn.onclick = () => cancelSearchCardJob(idx, jobId);
+        const jobId = data.job_id;
+        const cardEl = document.getElementById(`media-card-${idx}`);
+        if (cardEl) cardEl.dataset.activeJobId = jobId;
+
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = "Cancel";
+            btn.classList.add("cancel-mode");
+            btn.onclick = () => cancelSearchCardJob(idx, jobId);
+        }
+
+        let missCount = 0;
+        const timer = setInterval(async () => {
+            const currentCard = document.getElementById(`media-card-${idx}`);
+            if (!currentCard || currentCard.dataset.activeJobId !== jobId) {
+                clearInterval(timer);
+                searchCardJobMap.delete(idx);
+                return;
             }
-
-            const timer = setInterval(async () => {
-                const currentCard = document.getElementById(`media-card-${idx}`);
-                if (!currentCard || currentCard.dataset.activeJobId !== jobId) {
+            let j;
+            try {
+                const pr = await fetch(`/api/progress/${jobId}`);
+                j = await pr.json().catch(() => null);
+                if (pr.status === 404 || (j && j.status === "expired")) {
+                    // The job record aged out; stop polling instead of
+                    // hammering the endpoint for the rest of the session.
                     clearInterval(timer);
+                    searchCardJobMap.delete(idx);
+                    if (pctEl) pctEl.textContent = "Expired";
+                    resetToDownload("Download");
                     return;
                 }
-                try {
-                    const pr = await fetch(`/api/progress/${jobId}`);
-                    const j = await pr.json();
-                    if (j.status === "downloading") {
-                        const pct = Math.min(100, Math.max(0, j.percent || 0)).toFixed(0);
-                        if (fill) fill.style.width = `${pct}%`;
-                        if (pctEl) pctEl.textContent = `${pct}%  ${j.phase ? '· ' + j.phase : ''}`;
-                        if (speedElC) speedElC.textContent = j.speed || "";
-                    } else if (j.status === "processing") {
-                        if (fill) fill.style.width = "98%";
-                        if (pctEl) pctEl.textContent = "98% · finalizing";
-                        if (speedElC) speedElC.textContent = "";
-                    } else if (j.status === "done") {
-                        clearInterval(timer);
-                        if (fill) fill.style.width = "100%";
-                        if (pctEl) pctEl.textContent = "100% · done";
-                        if (speedElC) speedElC.textContent = "";
-                        if (btn) {
-                            btn.textContent = "Downloaded";
-                            btn.className = "btn-card-action done";
-                            btn.disabled = true;
-                            btn.onclick = null;
-                        }
-                        loadLibrary();
-                    } else if (j.status === "cancelled") {
-                        clearInterval(timer);
-                        if (fill) fill.style.width = "0%";
-                        if (pctEl) pctEl.textContent = "Cancelled";
-                        if (speedElC) speedElC.textContent = "";
-                        if (btn) {
-                            btn.textContent = "Download";
-                            btn.className = "btn-card-action";
-                            btn.disabled = false;
-                            btn.onclick = () => downloadSearchResult(encodedUrl, idx);
-                        }
-                    } else if (j.status === "error") {
-                        clearInterval(timer);
-                        if (pctEl) pctEl.textContent = "Failed";
-                        if (speedElC) speedElC.textContent = "";
-                        if (btn) {
-                            btn.textContent = "Retry";
-                            btn.className = "btn-card-action failed";
-                            btn.disabled = false;
-                            btn.onclick = () => downloadSearchResult(encodedUrl, idx);
-                        }
-                    }
-                } catch {
-                    // Keep polling
+                if (!j) throw new Error("bad payload");
+                missCount = 0;
+            } catch {
+                // Tolerate a handful of transient failures, then give up.
+                if (++missCount >= 20) {
+                    clearInterval(timer);
+                    searchCardJobMap.delete(idx);
+                    if (pctEl) pctEl.textContent = "Connection lost";
+                    resetToDownload("Retry");
                 }
-            }, 650);
-
-            searchCardJobMap.set(idx, { jobId, timer });
-        } else {
-            if (btn) {
-                btn.textContent = "Error";
-                btn.disabled = true;
+                return;
             }
-        }
-    } catch {
-        if (btn) {
-            btn.textContent = "Error";
-            btn.disabled = true;
-        }
+
+            if (j.status === "downloading") {
+                const pct = Math.min(100, Math.max(0, j.percent || 0)).toFixed(0);
+                if (fill) fill.style.width = `${pct}%`;
+                if (pctEl) pctEl.textContent = `${pct}%  ${j.phase ? "\u00B7 " + j.phase : ""}`;
+                if (speedElC) speedElC.textContent = j.speed || "";
+            } else if (j.status === "processing") {
+                if (fill) fill.style.width = "98%";
+                if (pctEl) pctEl.textContent = "98% \u00B7 finalizing";
+                if (speedElC) speedElC.textContent = "";
+            } else if (j.status === "done") {
+                clearInterval(timer);
+                searchCardJobMap.delete(idx);
+                if (fill) fill.style.width = "100%";
+                if (pctEl) pctEl.textContent = "100% \u00B7 done";
+                if (speedElC) speedElC.textContent = "";
+                if (btn) {
+                    btn.textContent = "Downloaded";
+                    btn.className = "btn-card-action done";
+                    btn.disabled = true;
+                    btn.onclick = null;
+                }
+                loadLibrary();
+            } else if (j.status === "cancelled") {
+                clearInterval(timer);
+                searchCardJobMap.delete(idx);
+                if (fill) fill.style.width = "0%";
+                if (pctEl) pctEl.textContent = "Cancelled";
+                if (speedElC) speedElC.textContent = "";
+                resetToDownload("Download");
+            } else if (j.status === "error") {
+                clearInterval(timer);
+                searchCardJobMap.delete(idx);
+                if (pctEl) pctEl.textContent = "Failed";
+                if (speedElC) speedElC.textContent = "";
+                resetToDownload("Retry");
+                showStatus(document.getElementById("search-status"),
+                    j.error || "Download failed.", "error");
+            }
+        }, 650);
+
+        searchCardJobMap.set(idx, { jobId, timer });
+    } catch (err) {
+        if (btn) { btn.textContent = "Error"; btn.disabled = true; }
+        showStatus(document.getElementById("search-status"),
+            "Connection failed: " + err.message, "error");
     }
 }
 
@@ -887,44 +1042,71 @@ function downloadSelectedPlaylistItems() {
 }
 
 async function executePlaylistBatchDownload(checks, statusBox, outputPath) {
-    const urls = Array.from(checks).map(c => c.getAttribute("data-url"));
-    showStatus(statusBox, `Enqueuing batch download for ${urls.length} items to ${outputPath}...`, "info");
+    const urls = Array.from(checks)
+        .map(c => c.getAttribute("data-url"))
+        .filter(u => typeof u === "string" && /^https?:\/\//i.test(u));
+
+    if (urls.length === 0) {
+        showStatus(statusBox, "None of the selected items have a usable link.", "error");
+        return;
+    }
+
+    const quality = document.getElementById("playlist-quality")?.value || "1080p";
+    showStatus(statusBox, `Enqueuing batch download for ${urls.length} item(s) to ${outputPath}...`, "info");
 
     try {
         const res = await fetch("/api/playlist/download", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ urls, quality: "4k", output_path: outputPath, use_turbo: true, use_stealth: true })
+            body: JSON.stringify({ urls, quality, output_path: outputPath, use_turbo: true, use_stealth: true })
         });
-        const data = await res.json();
-        if (res.ok && data.job_ids && data.job_ids.length > 0) {
-            const jobIds = data.job_ids;
-            showStatus(statusBox, `⏳ Downloading batch: 0 of ${jobIds.length} completed...`, "info");
-            
-            const pollInterval = setInterval(async () => {
-                try {
-                    let done = 0;
-                    let errors = 0;
-                    for (const jid of jobIds) {
-                        const pr = await fetch(`/api/progress/${jid}`);
-                        const jd = await pr.json();
-                        if (jd.status === "done") done++;
-                        else if (jd.status === "error" || jd.status === "cancelled") errors++;
-                    }
-                    if (done + errors >= jobIds.length) {
-                        clearInterval(pollInterval);
-                        showStatus(statusBox, `✅ Batch complete! ${done} downloaded, ${errors} failed. Saved to ${outputPath}.`, "success");
-                        loadLibrary();
-                    } else {
-                        showStatus(statusBox, `⏳ Downloading batch: ${done} of ${jobIds.length} completed...`, "info");
-                    }
-                } catch {
-                    // Keep polling
-                }
-            }, 1500);
-        } else {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.job_ids || data.job_ids.length === 0) {
             showStatus(statusBox, data.error || "Batch queue failed.", "error");
+            return;
         }
+
+        const jobIds = data.job_ids;
+        const skippedNote = data.skipped ? ` (${data.skipped} skipped)` : "";
+        showStatus(statusBox, `\u23F3 Downloading batch: 0 of ${jobIds.length} completed...${skippedNote}`, "info");
+
+        let missCount = 0;
+        const pollInterval = setInterval(async () => {
+            let payload;
+            try {
+                // One bulk request per tick. Polling each job individually meant
+                // 250 HTTP requests every 1.5s for a full playlist.
+                const pr = await fetch("/api/progress_bulk", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ job_ids: jobIds })
+                });
+                payload = await pr.json().catch(() => null);
+                if (!payload || !payload.counts) throw new Error("bad payload");
+                missCount = 0;
+            } catch {
+                if (++missCount >= 20) {
+                    clearInterval(pollInterval);
+                    showStatus(statusBox, "Lost contact with the local server during the batch.", "error");
+                }
+                return;
+            }
+
+            const counts = payload.counts;
+            const done = counts.done || 0;
+            const failed = (counts.error || 0) + (counts.cancelled || 0) + (counts.expired || 0);
+            if (done + failed >= jobIds.length) {
+                clearInterval(pollInterval);
+                const kind = failed === 0 ? "success" : (done === 0 ? "error" : "info");
+                showStatus(statusBox,
+                    `Batch complete: ${done} downloaded, ${failed} failed. Saved to ${outputPath}.`, kind);
+                loadLibrary();
+            } else {
+                showStatus(statusBox,
+                    `\u23F3 Downloading batch: ${done} of ${jobIds.length} completed${failed ? `, ${failed} failed` : ""}...`,
+                    "info");
+            }
+        }, 1500);
     } catch (err) {
         showStatus(statusBox, "Batch error: " + err.message, "error");
     }
@@ -932,35 +1114,50 @@ async function executePlaylistBatchDownload(checks, statusBox, outputPath) {
 
 function pollModuleJob(jobId, statusBox, btn, defaultSuccessMsg, onDone) {
     setBtnLoading(btn, true);
+    let missCount = 0;
     const timer = setInterval(async () => {
+        let data;
         try {
             const res = await fetch(`/api/progress/${jobId}`);
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data.status === "downloading" || data.status === "processing") {
-                const msg = data.message || "Processing media...";
-                const pct = (data.percent && data.percent > 0) ? ` (${data.percent.toFixed(0)}%)` : "";
-                showStatus(statusBox, `⏳ ${msg}${pct}`, "info");
-            } else if (data.status === "done") {
+            data = await res.json().catch(() => null);
+            if (res.status === 404 || (data && data.status === "expired")) {
                 clearInterval(timer);
                 setBtnLoading(btn, false);
-                const finalMsg = data.message || defaultSuccessMsg || "Completed successfully!";
-                showStatus(statusBox, `✅ ${finalMsg}`, "success");
-                loadLibrary();
-                if (typeof onDone === "function") onDone(data);
-            } else if (data.status === "error") {
-                clearInterval(timer);
-                setBtnLoading(btn, false);
-                showStatus(statusBox, `❌ Error: ${data.error || 'Operation failed.'}`, "error");
-            } else if (data.status === "cancelled") {
-                clearInterval(timer);
-                setBtnLoading(btn, false);
-                showStatus(statusBox, "Operation was cancelled by user.", "info");
+                showStatus(statusBox, "This job is no longer being tracked.", "error");
+                return;
             }
+            if (!data) throw new Error("bad payload");
+            missCount = 0;
         } catch {
-            // Keep polling
+            if (++missCount >= 20) {
+                clearInterval(timer);
+                setBtnLoading(btn, false);
+                showStatus(statusBox, "Lost contact with the local server.", "error");
+            }
+            return;
+        }
+
+        if (data.status === "downloading" || data.status === "processing") {
+            const msg = data.message || "Processing media...";
+            const pct = (data.percent && data.percent > 0) ? ` (${data.percent.toFixed(0)}%)` : "";
+            showStatus(statusBox, `\u23F3 ${msg}${pct}`, "info");
+        } else if (data.status === "done") {
+            clearInterval(timer);
+            setBtnLoading(btn, false);
+            showStatus(statusBox, `\u2705 ${data.message || defaultSuccessMsg || "Completed successfully!"}`, "success");
+            loadLibrary();
+            if (typeof onDone === "function") onDone(data);
+        } else if (data.status === "error") {
+            clearInterval(timer);
+            setBtnLoading(btn, false);
+            showStatus(statusBox, `\u274C ${data.error || "Operation failed."}`, "error");
+        } else if (data.status === "cancelled") {
+            clearInterval(timer);
+            setBtnLoading(btn, false);
+            showStatus(statusBox, "Operation was cancelled by user.", "info");
         }
     }, 750);
+    return timer;
 }
 
 // =========================================================================
@@ -1129,60 +1326,98 @@ async function loadLibrary() {
     try {
         const queryDir = currentDestination ? `?dir=${encodeURIComponent(currentDestination)}` : "";
         const res = await fetch(`/api/library${queryDir}`);
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
 
-        if (res.ok && data.files) {
-            if (pathLabel) pathLabel.textContent = `Location: ${data.directory} (${data.files.length} items)`;
+        if (!res.ok || !data || !Array.isArray(data.files)) {
             grid.innerHTML = "";
-
-            if (data.files.length === 0) {
-                grid.innerHTML = `<p style="color: var(--text-dim); font-size: 0.9rem; grid-column: 1/-1;">No media files found in your Downloads folder yet.</p>`;
-                return;
-            }
-
-            data.files.forEach(file => {
-                const card = document.createElement("div");
-                card.className = "library-card";
-                const sizeDisplay = file.size_formatted || (file.size_mb ? `${file.size_mb} MB` : "");
-                const dateDisplay = file.modified || file.date || "";
-                card.innerHTML = `
-                    <div class="library-card-top">
-                        <div class="lib-file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
-                        <span class="lib-ext-badge">${escapeHtml(file.ext || file.type || 'MEDIA')}</span>
-                    </div>
-                    <div class="lib-meta-row">
-                        <span>${escapeHtml(sizeDisplay)}</span>
-                        <span>${escapeHtml(dateDisplay)}</span>
-                    </div>
-                    <div style="display: flex; gap: 0.5rem; margin-top: 0.6rem;">
-                        <button class="btn-lib-action" style="flex: 1.2;" onclick="openLibraryFile('${encodeURIComponent(file.path)}')">▶ Play / Open</button>
-                        <button class="btn-lib-action" style="flex: 0.8; background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.15);" onclick="revealLibraryFile('${encodeURIComponent(file.path)}')" title="Highlight in Windows File Explorer">📁 Reveal</button>
-                    </div>
-                `;
-                grid.appendChild(card);
-            });
+            grid.appendChild(el("p", null, (data && data.error) || "Could not load library contents."))
+                .style.color = "#f87171";
+            return;
         }
+
+        if (pathLabel) pathLabel.textContent = `Location: ${data.directory} (${data.files.length} items)`;
+        grid.innerHTML = "";
+
+        if (data.files.length === 0) {
+            const empty = el("p", null, "No media files found in this folder yet.");
+            empty.style.color = "var(--text-dim)";
+            empty.style.fontSize = "0.9rem";
+            empty.style.gridColumn = "1/-1";
+            grid.appendChild(empty);
+            return;
+        }
+
+        data.files.forEach(file => grid.appendChild(buildLibraryCard(file)));
     } catch {
-        if (grid) grid.innerHTML = `<p style="color: #f87171;">Could not load library contents.</p>`;
+        grid.innerHTML = "";
+        const p = el("p", null, "Could not load library contents.");
+        p.style.color = "#f87171";
+        grid.appendChild(p);
     }
 }
 
-function openLibraryFile(encodedPath) {
-    const path = decodeURIComponent(encodedPath);
-    fetch("/api/library/open", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: path })
-    }).catch(console.error);
+function buildLibraryCard(file) {
+    const card = el("div", "library-card");
+
+    const top = el("div", "library-card-top");
+    const name = el("div", "lib-file-name", file.name);
+    name.title = file.path || file.name;
+    top.appendChild(name);
+    top.appendChild(el("span", "lib-ext-badge", file.ext || file.type || "MEDIA"));
+    card.appendChild(top);
+
+    const metaRow = el("div", "lib-meta-row");
+    metaRow.appendChild(el("span", null, file.size_formatted || (file.size_mb ? `${file.size_mb} MB` : "")));
+    metaRow.appendChild(el("span", null, file.modified || file.date || ""));
+    card.appendChild(metaRow);
+
+    const actions = el("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.6rem";
+
+    const playBtn = el("button", "btn-lib-action", "\u25B6 Play / Open");
+    playBtn.type = "button";
+    playBtn.style.flex = "1.2";
+    playBtn.addEventListener("click", () => openLibraryFile(file.path));
+    actions.appendChild(playBtn);
+
+    const revealBtn = el("button", "btn-lib-action", "\uD83D\uDCC1 Reveal");
+    revealBtn.type = "button";
+    revealBtn.style.flex = "0.8";
+    revealBtn.style.background = "rgba(255,255,255,0.07)";
+    revealBtn.style.borderColor = "rgba(255,255,255,0.15)";
+    revealBtn.title = "Highlight in the file manager";
+    revealBtn.addEventListener("click", () => revealLibraryFile(file.path));
+    actions.appendChild(revealBtn);
+
+    card.appendChild(actions);
+    return card;
 }
 
-function revealLibraryFile(encodedPath) {
-    const path = decodeURIComponent(encodedPath);
-    fetch("/api/library/reveal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: path })
-    }).catch(console.error);
+async function libraryAction(endpoint, path, failureLabel) {
+    try {
+        const res = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, file_path: path })
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            // A blocked executable or a deleted file used to fail silently.
+            alert(data.error || failureLabel);
+        }
+    } catch (err) {
+        alert(`${failureLabel} (${err.message})`);
+    }
+}
+
+function openLibraryFile(path) {
+    libraryAction("/api/library/open", path, "Could not open that file.");
+}
+
+function revealLibraryFile(path) {
+    libraryAction("/api/library/reveal", path, "Could not reveal that file.");
 }
 
 // =========================================================================
@@ -1226,37 +1461,29 @@ function showDrmNotice(box, data) {
     const title = (data && data.suggested_title) ? String(data.suggested_title).trim() : "";
     const cleanMsg = (data && (data.error || data.message)) || "This media is protected with proprietary DRM encryption.";
 
-    let buttonHtml = "";
-    if (title) {
-        buttonHtml = `
-            <button class="btn-drm-search" onclick="switchToSearchTab('${encodeURIComponent(title)}')">
-                <span>🔍 Search &amp; Download "${escapeHtml(title)}" via Search Tab</span>
-            </button>
-        `;
-    } else {
-        buttonHtml = `
-            <button class="btn-drm-search" onclick="switchToSearchTab('')">
-                <span>🔍 Search Media by Title (Open Web &amp; YouTube)</span>
-            </button>
-        `;
-    }
+    box.innerHTML = "";
 
-    box.innerHTML = `
-        <div class="drm-notice-header">
-            <span class="drm-notice-icon">🛡️</span>
-            <span>Protected DRM Subscription Content &bull; ${escapeHtml(platform)}</span>
-        </div>
-        <div class="drm-notice-body">
-            ${escapeHtml(cleanMsg)}
-        </div>
-        <div class="drm-notice-action">
-            ${buttonHtml}
-        </div>
-    `;
+    const header = el("div", "drm-notice-header");
+    header.appendChild(el("span", "drm-notice-icon", "\uD83D\uDEE1\uFE0F"));
+    header.appendChild(el("span", null, `Protected DRM Subscription Content \u2022 ${platform}`));
+    box.appendChild(header);
+
+    box.appendChild(el("div", "drm-notice-body", cleanMsg));
+
+    const action = el("div", "drm-notice-action");
+    const btn = el("button", "btn-drm-search");
+    btn.type = "button";
+    btn.appendChild(el("span", null, title
+        ? `\uD83D\uDD0D Search & Download "${title}" via Search Tab`
+        : "\uD83D\uDD0D Search Media by Title (Open Web & YouTube)"));
+    // Bound as a listener, so a title containing quotes cannot escape into markup.
+    btn.addEventListener("click", () => switchToSearchTab(title));
+    action.appendChild(btn);
+    box.appendChild(action);
 }
 
-function switchToSearchTab(encodedTitle) {
-    const title = encodedTitle ? decodeURIComponent(encodedTitle) : "";
+function switchToSearchTab(rawTitle) {
+    const title = rawTitle ? String(rawTitle) : "";
 
     // 1. Switch to Universal Downloader module if in another module
     const universalBtn = document.querySelector(`[onclick*="universal-module"]`);
@@ -1300,14 +1527,27 @@ let currentCinemaTitle = "";
 let currentCinemaUrl = "";
 let cinemaServerIndex = 0;
 
-// Global Quidian AdShield: Neutralize any rogue popup triggers or window unloads
+// Global Quidian AdShield.
+//
+// The previous build replaced window.open with a stub that returned null for
+// everything, which silently broke the app's own "open on Netflix / Prime"
+// buttons. Popups are now blocked only while the cinema modal is on screen,
+// and only when the app itself is not the caller.
+let adShieldAllowNextOpen = false;
+
 (function initQuidianAdShield() {
     try {
-        window.open = function(...args) {
-            console.warn("[Quidian AdShield] Blocked popup attempt:", args[0] || "about:blank");
+        const nativeOpen = window.open.bind(window);
+        window.open = function (...args) {
+            const cinemaOpen = !!document.querySelector("#cinema-modal:not(.hidden)");
+            if (adShieldAllowNextOpen || !cinemaOpen) {
+                adShieldAllowNextOpen = false;
+                return nativeOpen(...args);
+            }
+            console.warn("[Quidian AdShield] Blocked popup from embedded player:", args[0] || "about:blank");
             return null;
         };
-        // Block middle-click / auxiliary click popup attempts inside cinema modal
+        // Block middle-click / auxiliary-click popups inside the cinema modal.
         window.addEventListener("auxclick", (e) => {
             if (e.target && e.target.closest && e.target.closest("#cinema-modal")) {
                 e.preventDefault();
@@ -1318,6 +1558,17 @@ let cinemaServerIndex = 0;
         console.warn("[Quidian AdShield] Setup warning:", e);
     }
 })();
+
+/** Open a URL in a new tab, bypassing AdShield for app-initiated navigation. */
+function openExternal(url) {
+    const safe = safeHttpUrl(url);
+    if (!safe) return false;
+    adShieldAllowNextOpen = true;
+    const win = window.open(safe, "_blank", "noopener,noreferrer");
+    adShieldAllowNextOpen = false;
+    if (win) win.opener = null;
+    return !!win;
+}
 
 const CINEMA_SERVERS = [
     {
@@ -1360,7 +1611,7 @@ const CINEMA_SERVERS = [
 function playDirectly(title, imdbId, platform, originalUrl) {
     currentCinemaTitle = (title || "Movie Stream").trim();
     currentCinemaImdbId = (imdbId || "").trim();
-    currentCinemaUrl = decodeURIComponent(originalUrl || "");
+    currentCinemaUrl = safeHttpUrl(originalUrl || "");
     cinemaServerIndex = 0;
 
     const modal = document.getElementById("cinema-modal");
@@ -1396,7 +1647,12 @@ function loadCinemaServer(index) {
 
     if (iframe) {
         iframe.src = "about:blank";
-        const targetUrl = srv.makeUrl(currentCinemaImdbId, currentCinemaTitle);
+        // These are untrusted third-party embeds: keep them sandboxed and
+        // referrer-free, and never let them read the parent origin.
+        iframe.setAttribute("referrerpolicy", "no-referrer");
+        iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation allow-fullscreen");
+        const targetUrl = safeHttpUrl(srv.makeUrl(currentCinemaImdbId, currentCinemaTitle));
+        if (!targetUrl) return;
         setTimeout(() => {
             iframe.src = targetUrl;
         }, 50);
@@ -1429,7 +1685,7 @@ function downloadFromCinemaModal() {
         }
         downloadByLink();
     } else if (currentCinemaTitle) {
-        switchToSearchTab(encodeURIComponent(currentCinemaTitle));
+        switchToSearchTab(currentCinemaTitle);
     }
 }
 

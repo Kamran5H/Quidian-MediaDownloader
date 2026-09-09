@@ -81,6 +81,9 @@ Media_Downloader_Project/
 │   └── styles.css         # Quidian dark aurora glassmorphism design system
 ├── templates/
 │   └── index.html         # Quidian dashboard UI & AdShield cinema player
+├── tests/
+│   ├── test_media_downloader.py  # Original scrutiny suite
+│   └── test_hardening.py         # Regression pins for every audited defect
 ├── environment.yml        # Conda environment definition
 ├── requirements.txt       # Python package dependencies
 ├── setup_studio.bat       # One-click environment installer & verifier
@@ -89,8 +92,66 @@ Media_Downloader_Project/
 
 ---
 
+## Configuration
+
+All optional, read from the environment at startup:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `QUIDIAN_PORT` | `5050` | HTTP port for the dashboard |
+| `QUIDIAN_WORKERS` | `3` | Concurrent download workers (1-8) |
+| `QUIDIAN_MAX_BATCH` | `250` | Maximum URLs accepted per batch request |
+
+`playwright` is optional. It is only used by the Stealth Stream Interceptor's
+deep browser-sniffing path; everything else runs without it. `GET /api/health`
+reports exactly which engines are present:
+
+```bash
+curl http://127.0.0.1:5050/api/health
+```
+
+---
+
+## REST API
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET` | `/api/health` | Real readiness of ffmpeg, ffprobe, aria2c, gallery-dl, yt-dlp, playwright |
+| `GET` | `/api/preset_paths` | Standard destination folders |
+| `POST` | `/api/browse_folder` | Native directory picker |
+| `POST` | `/api/search` | Multi-source ranked search |
+| `GET` | `/api/resolve_imdb` | Server-side IMDb lookup (CORS proxy) |
+| `POST` | `/api/download_video` | Start a download job |
+| `POST` | `/api/playlist/inspect` | Flat playlist/channel inspection |
+| `POST` | `/api/playlist/download` | Queue a batch |
+| `POST` | `/api/social/download` | gallery-dl scrape |
+| `POST` | `/api/audio/rip` | Rip / transcode + tag audio |
+| `POST` | `/api/download_subtitle` | Extract and convert subtitles to `.srt` |
+| `GET` | `/api/library` | List media in a folder (read-only) |
+| `POST` | `/api/library/open` \| `/reveal` | Launch or highlight a file |
+| `GET` | `/api/progress/<job_id>` | Single job status |
+| `POST` | `/api/progress_bulk` | Batch job status in one round trip |
+| `POST` | `/api/cancel/<job_id>` | Cancel a running job |
+
+Every `/api/*` response is JSON, including errors. The server binds to loopback
+only, rejects non-loopback `Host` headers (DNS-rebinding defence) and rejects
+cross-origin requests.
+
+---
+
+## Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+`tests/test_hardening.py` pins the defects found during the deep audit: JSON
+error contracts, job-registry state machine, path-launch safety, download
+staging, search concurrency and ranking, subtitle conversion, audio bitrate and
+tagging, subprocess lifecycle, and front-end escaping invariants.
+
+---
+
 ## Credits
 - **Developer:** Kamran Ashraf
 - **Engines:** yt-dlp, gallery-dl, FFmpeg, aria2c, Mutagen, Flask
-
-

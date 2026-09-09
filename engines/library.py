@@ -1,103 +1,148 @@
+"""
+Quidian - Downloads library scanner and safe launcher.
+Developed by Kamran Ashraf
+"""
+
 import os
-import sys
 import subprocess
+import sys
 import time
 
-
 MEDIA_EXTENSIONS = {
-    "video": (".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".wmv", ".3gp"),
-    "audio": (".mp3", ".m4a", ".flac", ".wav", ".aac", ".opus", ".ogg", ".wma"),
-    "subtitle": (".srt", ".vtt", ".ass", ".sub", ".smi"),
-    "image": (".jpg", ".jpeg", ".png", ".webp", ".gif", ".jfif", ".bmp", ".svg"),
+    "video": (".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v",
+              ".wmv", ".3gp", ".mpg", ".mpeg", ".m2ts", ".ogv"),
+    "audio": (".mp3", ".m4a", ".flac", ".wav", ".aac", ".opus", ".ogg", ".wma",
+              ".aiff", ".alac"),
+    "subtitle": (".srt", ".vtt", ".ass", ".sub", ".smi", ".ssa"),
+    "image": (".jpg", ".jpeg", ".png", ".webp", ".gif", ".jfif", ".bmp", ".svg",
+              ".avif", ".heic"),
 }
 
+# Flattened lookup so categorising a file is O(1) instead of a nested scan.
+_EXT_CATEGORY = {ext: cat for cat, exts in MEDIA_EXTENSIONS.items() for ext in exts}
 
-def _scan_entry(entry, items):
-    if not entry.is_file():
-        return
+# Never hand these to the shell/OS launcher, whatever the user clicks.
+BLOCKED_EXEC_EXTENSIONS = {
+    ".exe", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse",
+    ".scr", ".msi", ".msp", ".dll", ".com", ".pif", ".cpl", ".reg", ".wsf",
+    ".wsh", ".hta", ".lnk", ".jar", ".apk", ".sh", ".application", ".gadget",
+    ".msc", ".inf", ".scf", ".url",
+}
+
+# Bound the walk so a Downloads folder with 100k files cannot stall the UI.
+_MAX_SCAN_ENTRIES = 20000
+
+
+def _scan_entry(entry, items, group=None):
+    """Append one media file to ``items``; silently skip anything unreadable."""
     ext = os.path.splitext(entry.name)[1].lower()
-    category = None
-    for cat, extensions in MEDIA_EXTENSIONS.items():
-        if ext in extensions:
-            category = cat
-            break
+    category = _EXT_CATEGORY.get(ext)
     if not category:
         return
 
     try:
         stat = entry.stat()
-        size_mb = round(stat.st_size / (1024 * 1024), 2)
-        mod_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
-        items.append({
-            "name": entry.name,
-            "path": entry.path,
-            "ext": ext.replace(".", "").upper(),
-            "category": category,
-            "size_mb": size_mb,
-            "size_formatted": f"{size_mb} MB" if size_mb >= 1 else f"{round(stat.st_size / 1024, 1)} KB",
-            "mtime": stat.st_mtime,
-            "date": mod_time,
-            "modified": mod_time,
-        })
-    except Exception:
-        pass
+    except (PermissionError, OSError):
+        return
+
+    size_bytes = stat.st_size
+    size_mb = round(size_bytes / (1024 * 1024), 2)
+    mod_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
+    items.append({
+        "name": entry.name,
+        "path": entry.path,
+        "ext": ext.replace(".", "").upper(),
+        "category": category,
+        "group": group,
+        "size_bytes": size_bytes,
+        "size_mb": size_mb,
+        "size_formatted": _format_size(size_bytes),
+        "mtime": stat.st_mtime,
+        "date": mod_time,
+        "modified": mod_time,
+    })
 
 
-BLOCKED_EXEC_EXTENSIONS = {
-    ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".scr",
-    ".msi", ".dll", ".com", ".pif", ".cpl", ".reg", ".wsf"
-}
+def _format_size(size_bytes):
+    if size_bytes >= 1024 ** 3:
+        return f"{size_bytes / 1024 ** 3:.2f} GB"
+    if size_bytes >= 1024 ** 2:
+        return f"{size_bytes / 1024 ** 2:.2f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
 
 
 def list_downloads(downloads_dir, limit=50):
     """
-    Scan the user's Downloads directory (and immediate subdirectories)
-    and return recent media files sorted newest-first.
+    Scan a directory (plus its immediate subdirectories) and return recent
+    media files, newest first.
     """
-    if not os.path.exists(downloads_dir):
+    if not downloads_dir or not os.path.isdir(downloads_dir):
         return []
 
     items = []
+    scanned = 0
     try:
         with os.scandir(downloads_dir) as entries:
             for entry in entries:
+                if scanned >= _MAX_SCAN_ENTRIES:
+                    break
+                scanned += 1
                 try:
-                    if entry.is_file():
+                    if entry.is_file(follow_symlinks=False):
                         _scan_entry(entry, items)
-                    elif entry.is_dir() and not entry.name.startswith("."):
-                        # Scan 1-level subdirectories (e.g., gallery-dl scraped media)
+                    elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                        # One level down catches gallery-dl's per-album folders.
                         try:
                             with os.scandir(entry.path) as sub_entries:
                                 for sub in sub_entries:
+                                    if scanned >= _MAX_SCAN_ENTRIES:
+                                        break
+                                    scanned += 1
                                     try:
-                                        if sub.is_file():
-                                            _scan_entry(sub, items)
+                                        if sub.is_file(follow_symlinks=False):
+                                            _scan_entry(sub, items, group=entry.name)
                                     except (PermissionError, OSError):
-                                        pass
+                                        continue
                         except (PermissionError, OSError):
-                            pass
+                            continue
                 except (PermissionError, OSError):
-                    pass
+                    continue
 
         items.sort(key=lambda x: x["mtime"], reverse=True)
     except Exception as e:
         print(f"Library scan error: {e}")
 
+    try:
+        limit = max(1, int(limit))
+    except (TypeError, ValueError):
+        limit = 50
     return items[:limit]
 
 
-def open_downloaded_file(filepath):
-    """Open the file in the default OS player/application, blocking dangerous executables."""
-    if not os.path.exists(filepath):
+def _assert_launchable(filepath):
+    """Normalize a path and refuse anything that could execute code."""
+    if not filepath:
+        raise FileNotFoundError("No path provided.")
+    norm = os.path.realpath(os.path.normpath(os.path.abspath(filepath)))
+    if not os.path.exists(norm):
         raise FileNotFoundError(f"File not found: {filepath}")
+    if os.path.isfile(norm):
+        ext = os.path.splitext(norm)[1].lower()
+        if ext in BLOCKED_EXEC_EXTENSIONS:
+            raise PermissionError(
+                f"Direct launch of executable file '{os.path.basename(norm)}' is blocked for system security."
+            )
+    return norm
 
-    norm = os.path.normpath(filepath)
-    ext = os.path.splitext(norm)[1].lower()
-    if ext in BLOCKED_EXEC_EXTENSIONS:
-        raise PermissionError(f"Direct launch of executable file '{os.path.basename(norm)}' is blocked for system security.")
+
+def open_downloaded_file(filepath):
+    """Open a file or folder in the OS default application, never an executable."""
+    norm = _assert_launchable(filepath)
 
     if sys.platform.startswith("win"):
-        os.startfile(norm)
+        os.startfile(norm)  # noqa: S606 - extension allow-list enforced above
     elif sys.platform == "darwin":
         subprocess.Popen(["open", norm])
     else:
@@ -106,19 +151,23 @@ def open_downloaded_file(filepath):
 
 
 def reveal_in_explorer(filepath):
-    """Highlight the file in Windows File Explorer or native file manager."""
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"Path not found: {filepath}")
+    """
+    Highlight a file in the native file manager.
 
-    norm = os.path.normpath(filepath)
+    The path is passed as an argv element, never interpolated into a shell
+    string - a filename containing quotes or '&' would otherwise have been
+    executed as a command.
+    """
+    norm = _assert_launchable(filepath)
+
     if sys.platform.startswith("win"):
-        cmd = f'explorer.exe /select,"{norm}"'
-        subprocess.run(cmd, shell=True, timeout=10)
+        # explorer.exe returns a non-zero exit code even on success, so the
+        # result is deliberately not checked.
+        subprocess.run(["explorer.exe", f"/select,{norm}"], timeout=15, check=False)
         return True
-    elif sys.platform == "darwin":
-        subprocess.run(["open", "-R", norm], timeout=10)
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-R", norm], timeout=15, check=False)
         return True
-    else:
-        parent = os.path.dirname(norm)
-        subprocess.Popen(["xdg-open", parent])
-        return True
+    parent = norm if os.path.isdir(norm) else os.path.dirname(norm)
+    subprocess.Popen(["xdg-open", parent])
+    return True

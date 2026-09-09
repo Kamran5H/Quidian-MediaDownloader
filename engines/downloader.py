@@ -3,7 +3,6 @@ warnings.filterwarnings("ignore")
 
 import os
 import re
-import sys
 import shutil
 import tempfile
 import uuid
@@ -88,40 +87,61 @@ def _get_unique_path(dst):
     return f"{base} ({counter}){ext}"
 
 
+SIDECAR_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".json", ".description",
+                ".annotations.xml", ".part", ".ytdl", ".temp"}
+
+
 def _move_into(output_path, stage_dir, primary_name=None, attempts=8):
-    """Safely transfer completed media from isolated staging to the real downloads directory."""
+    """Safely transfer completed media from isolated staging to the real downloads directory.
+
+    Returns the path of the *primary* media file. When yt-dlp did not tell us
+    which file that is, the largest non-sidecar file wins - previously the
+    first entry of an unordered listdir() could hand back a thumbnail .jpg.
+    """
     os.makedirs(output_path, exist_ok=True)
+    moved = []          # (original_name, destination_path, size)
     final_primary = None
-    for name in os.listdir(stage_dir):
+
+    for name in sorted(os.listdir(stage_dir)):
         src = os.path.join(stage_dir, name)
         if not os.path.isfile(src):
             continue
-        dst = os.path.join(output_path, name)
-        dst = _get_unique_path(dst)
+        try:
+            size = os.path.getsize(src)
+        except OSError:
+            size = 0
+        dst = _get_unique_path(os.path.join(output_path, name))
         for i in range(attempts):
             try:
                 shutil.move(src, dst)
-                if primary_name and name == primary_name:
-                    final_primary = dst
-                elif not final_primary:
-                    final_primary = dst
+                moved.append((name, dst, size))
                 break
             except (PermissionError, OSError):
                 if i < attempts - 1:
+                    # Windows AV scanners and OneDrive hold brief locks on
+                    # freshly written files; back off and retry.
                     time.sleep(0.6)
                     continue
-                # Fallback to unique timestamped name
                 base, ext = os.path.splitext(dst)
                 alt = f"{base}_{int(time.time())}{ext}"
                 try:
                     shutil.move(src, alt)
-                    final_primary = alt
+                    moved.append((name, alt, size))
                 except Exception:
                     pass
-    try:
-        shutil.rmtree(stage_dir, ignore_errors=True)
-    except Exception:
-        pass
+
+    if primary_name:
+        for name, dst, _size in moved:
+            if name == primary_name:
+                final_primary = dst
+                break
+    if not final_primary:
+        candidates = [m for m in moved if os.path.splitext(m[0])[1].lower() not in SIDECAR_EXTS]
+        pool = candidates or moved
+        if pool:
+            final_primary = max(pool, key=lambda m: m[2])[1]
+
+    shutil.rmtree(stage_dir, ignore_errors=True)
     return final_primary
 
 
@@ -171,6 +191,13 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
         "noprogress": True,
         "retries": 12,
         "fragment_retries": 12,
+        "extractor_retries": 3,
+        # Without a socket timeout a stalled CDN connection hangs the worker
+        # thread forever and the job never resolves.
+        "socket_timeout": 30,
+        "overwrites": False,
+        "continuedl": True,
+        "trim_file_name": 180,
         "http_headers": headers,
     }
 
@@ -178,7 +205,8 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
     if use_turbo and check_aria2c_installed():
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = [
-            "-c", "-j", "16", "-x", "16", "-s", "16", "-k", "1M"
+            "-c", "-j", "16", "-x", "16", "-s", "16", "-k", "1M",
+            "--max-tries=5", "--retry-wait=2", "--connect-timeout=20", "--timeout=30",
         ]
     else:
         opts["concurrent_fragment_downloads"] = 8
@@ -215,6 +243,14 @@ def normalize_url(raw_input):
     s = (raw_input or "").strip().strip('"').strip("'")
     if not s:
         return None, None
+
+    # A pasted local file path is not a search query - say so plainly instead
+    # of silently running a YouTube search for "C:\Users\...\clip.mp4".
+    if os.path.isfile(s):
+        raise ValueError(
+            "That is a local file path. Use the Audio Studio to convert local files; "
+            "the downloader needs a web link or a search phrase."
+        )
 
     # If it's already a full URL
     if s.startswith("http://") or s.startswith("https://"):
@@ -268,27 +304,26 @@ def verify_download_integrity(filepath, is_audio=False):
     if size < min_bytes:
         return False, f"Media file is truncated or corrupted (file size only {size} bytes)."
     
-    # Optional FFprobe container verification if FFmpeg/FFprobe is on PATH
+    # Optional FFprobe container verification if FFmpeg/FFprobe is on PATH.
+    # A file that has bytes but no decodable stream is the classic "downloaded
+    # but won't play" failure, so probe for *any* stream rather than a video one.
     if shutil.which("ffprobe"):
         try:
             res = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+                ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=10,
+                timeout=20,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             )
-            if not is_audio and res.returncode != 0:
-                # Test audio stream if video stream wasn't present
-                ares = subprocess.run(
-                    ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                )
-                if ares.returncode != 0:
-                    return False, "File container verification failed (stream unreadable)."
+            stream_types = (res.stdout or b"").decode("utf-8", "replace").split()
+            if res.returncode != 0 or not stream_types:
+                return False, "File container verification failed (no decodable stream)."
+            if not is_audio and "video" not in stream_types and "audio" not in stream_types:
+                return False, "File container verification failed (stream unreadable)."
+        except subprocess.TimeoutExpired:
+            pass
         except Exception:
             pass
 
@@ -308,8 +343,11 @@ def _score_movie_candidate(c, canonical_title, year=None, cast_names=None):
     # Must be a full-length release (at least 40 minutes if duration is known)
     if 0 < dur < 2400:
         return -1000
-    elif dur == 0:
-        score -= 20  # Mild uncertainty penalty, but don't reject archive/dailymotion releases
+    elif dur == 0 and not c.get("longform_source"):
+        # Mild uncertainty penalty. Sources that only publish feature-length
+        # material (Archive.org) declare longform_source and are exempt rather
+        # than being handed a fabricated runtime.
+        score -= 20
 
     # Disqualify common derivative junk (trailers, clips, scenes, reactions) even if duration is unknown
     JUNK_WORDS = [
@@ -384,7 +422,7 @@ def _score_movie_candidate(c, canonical_title, year=None, cast_names=None):
     platform = (c.get("source") or c.get("platform") or "").lower()
     if "dailymotion" in platform and dur >= 3600:
         score += 60
-    elif "archive" in platform and dur >= 3000:
+    elif "archive" in platform and (dur >= 3000 or c.get("longform_source")):
         score += 50
     elif "youtube" in platform:
         is_verified = bool(c.get("verified") or c.get("is_official"))
@@ -521,13 +559,18 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
 
 def download_media(url, output_path, quality="4k", progress_hook=None,
                    postprocessor_hook=None, use_turbo=True, cookies_from_browser=None,
-                   status_callback=None, use_stealth=True):
+                   status_callback=None, use_stealth=True, cancel_check=None):
     """
     Execute high-speed download into an isolated staging directory,
     then relocate safely into the destination folder without leaving temp clutter.
     If 403 Forbidden or platform locks are encountered, automatically fall back to
     the StealthStreamInterceptor to bypass Cloudflare and stream protections.
     """
+    def _abort_if_cancelled():
+        if cancel_check and cancel_check():
+            raise (DownloadCancelled() if DownloadCancelled else RuntimeError("Cancelled"))
+
+    _abort_if_cancelled()
     resolved_url, query_term = normalize_url(url)
     if not resolved_url:
         # User entered a search query instead of a direct link.
@@ -562,6 +605,7 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             if status_callback:
                 status_callback(f"Selected: {candidates[0].get('title')}", 15)
 
+    _abort_if_cancelled()
     url = resolved_url
     url_lower = url.lower()
 
@@ -585,15 +629,22 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
         if status_callback:
             status_callback("Platform lock recognized. Engaging Stealth Stream Interceptor...", 10)
         from .stealth_sniffer import StealthStreamInterceptor
-        interceptor = StealthStreamInterceptor(output_path=output_path, status_callback=status_callback)
+        interceptor = StealthStreamInterceptor(
+            output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
+        )
         try:
             res = interceptor.bypass_and_extract(url, quality=quality)
             if res and res.get("filepath"):
                 valid, err = verify_download_integrity(res["filepath"], is_audio=(quality == "audio"))
                 if not valid:
                     raise RuntimeError(f"Stream verification failed: {err}")
-            return res
+                return res
+            # A None result means the resolver found nothing; fall through to
+            # the standard pipeline rather than reporting a phantom success.
+            raise RuntimeError("Stealth interceptor found no downloadable stream.")
         except Exception as stealth_err:
+            if DownloadCancelled and isinstance(stealth_err, DownloadCancelled):
+                raise
             if status_callback:
                 status_callback(f"Stealth note: {stealth_err}. Falling back to standard pipeline...", 15)
 
@@ -640,7 +691,12 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             raise
 
         err_str = str(e).lower()
-        if "drm" in err_str and ("widevine" in err_str or "drm protection" in err_str or "[drm]" in err_str):
+        # yt-dlp phrases this as "This video is DRM protected"; the old check
+        # required "widevine"/"drm protection" and therefore never matched.
+        drm_markers = ("drm protected", "drm-protected", "drm protection", "widevine",
+                       "playready", "fairplay", "[drm]", "protected by drm",
+                       "encrypted content", "requires a decryption key")
+        if any(marker in err_str for marker in drm_markers):
             title = resolve_page_title(url) or ""
             suggested = title.strip()
             title_display = f" '{suggested}'" if suggested else ""
@@ -659,7 +715,9 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             if status_callback:
                 status_callback("Cloudflare / Platform lock detected. Activating Stealth Stream Interceptor...", 15)
             from .stealth_sniffer import StealthStreamInterceptor
-            interceptor = StealthStreamInterceptor(output_path=output_path, status_callback=status_callback)
+            interceptor = StealthStreamInterceptor(
+                output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
+            )
             return interceptor.bypass_and_extract(url, quality=quality)
 
         raise RuntimeError(f"Engine failure: {e}")
