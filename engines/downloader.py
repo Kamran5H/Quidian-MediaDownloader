@@ -28,27 +28,40 @@ DRM_SUBSCRIPTION_PLATFORMS = {
 
 
 def resolve_page_title(url):
-    """Attempt fast metadata extraction from URL or page HTML via curl_cffi."""
+    """Attempt fast metadata extraction from URL or page HTML via curl_cffi or urllib."""
+    html_text = None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
         from curl_cffi import requests as cffi
-        import html
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
         r = cffi.get(url, headers=headers, impersonate="chrome124", timeout=5)
         if r.status_code in (200, 202):
-            m = re.search(r'<title>(.*?)</title>', r.text, re.IGNORECASE)
-            if m:
-                t = html.unescape(m.group(1)).strip()
-                t = re.sub(r'^(Watch|Prime Video:)\s*', '', t, flags=re.I)
-                t = re.sub(r'\s*\|\s*(Prime Video|Netflix|IMDb|Disney\+?|Hulu|HBO|Apple\s*TV).*$', '', t, flags=re.I)
-                t = re.sub(r'\s*-\s*(IMDb|Netflix|Prime Video).*$', '', t, flags=re.I)
-                clean_t = t.strip()
-                if clean_t and len(clean_t) > 1:
-                    return clean_t
+            html_text = r.text
     except Exception:
         pass
+
+    if not html_text:
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                html_text = resp.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+
+    if html_text:
+        import html
+        m = re.search(r'<title>(.*?)</title>', html_text, re.IGNORECASE)
+        if m:
+            t = html.unescape(m.group(1)).strip()
+            t = re.sub(r'^(Watch|Prime Video:)\s*', '', t, flags=re.I)
+            t = re.sub(r'\s*\|\s*(Prime Video|Netflix|IMDb|Disney\+?|Hulu|HBO|Apple\s*TV).*$', '', t, flags=re.I)
+            t = re.sub(r'\s*-\s*(IMDb|Netflix|Prime Video).*$', '', t, flags=re.I)
+            clean_t = t.strip()
+            if clean_t and len(clean_t) > 1:
+                return clean_t
 
     # Fallback to parsing URL slug if page fetch is blocked
     try:
@@ -101,6 +114,7 @@ def _move_into(output_path, stage_dir, primary_name=None, attempts=8):
     os.makedirs(output_path, exist_ok=True)
     moved = []          # (original_name, destination_path, size)
     final_primary = None
+    failed_moves = []
 
     for name in sorted(os.listdir(stage_dir)):
         src = os.path.join(stage_dir, name)
@@ -111,24 +125,39 @@ def _move_into(output_path, stage_dir, primary_name=None, attempts=8):
         except OSError:
             size = 0
         dst = _get_unique_path(os.path.join(output_path, name))
+        move_succeeded = False
         for i in range(attempts):
             try:
                 shutil.move(src, dst)
                 moved.append((name, dst, size))
+                move_succeeded = True
                 break
             except (PermissionError, OSError):
                 if i < attempts - 1:
                     # Windows AV scanners and OneDrive hold brief locks on
                     # freshly written files; back off and retry.
-                    time.sleep(0.6)
+                    time.sleep(0.5)
                     continue
+                # Try unique alternate name with copy2 + remove fallback
                 base, ext = os.path.splitext(dst)
-                alt = f"{base}_{int(time.time())}{ext}"
+                alt = _get_unique_path(f"{base}_{int(time.time())}{ext}")
                 try:
                     shutil.move(src, alt)
                     moved.append((name, alt, size))
+                    move_succeeded = True
                 except Exception:
-                    pass
+                    try:
+                        shutil.copy2(src, alt)
+                        try:
+                            os.remove(src)
+                        except Exception:
+                            pass
+                        moved.append((name, alt, size))
+                        move_succeeded = True
+                    except Exception:
+                        pass
+        if not move_succeeded and os.path.exists(src):
+            failed_moves.append(name)
 
     if primary_name:
         for name, dst, _size in moved:
@@ -140,6 +169,12 @@ def _move_into(output_path, stage_dir, primary_name=None, attempts=8):
         pool = candidates or moved
         if pool:
             final_primary = max(pool, key=lambda m: m[2])[1]
+
+    if failed_moves and not moved:
+        raise RuntimeError(
+            f"Failed to relocate downloaded file(s) {failed_moves} into '{output_path}'. "
+            "The destination directory or file may be locked by another application."
+        )
 
     shutil.rmtree(stage_dir, ignore_errors=True)
     return final_primary
@@ -273,18 +308,33 @@ def normalize_url(raw_input):
 
     # Resolve YouTube clip to the full original video so the user gets the complete video
     if "youtube.com/clip/" in url or "youtu.be/clip/" in url:
+        clip_html = None
         try:
             from curl_cffi import requests as cffi
             r = cffi.get(url, impersonate="chrome124", timeout=6)
             if r.status_code == 200:
-                m = re.search(r'"originalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', r.text)
-                if not m:
-                    m = re.search(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', r.text)
-                if m:
-                    full_id = m.group(1)
-                    return f"https://www.youtube.com/watch?v={full_id}", None
+                clip_html = r.text
         except Exception:
             pass
+
+        if not clip_html:
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    clip_html = resp.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+
+        if clip_html:
+            m = re.search(r'"originalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', clip_html)
+            if not m:
+                m = re.search(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', clip_html)
+            if not m:
+                m = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', clip_html)
+            if m:
+                full_id = m.group(1)
+                return f"https://www.youtube.com/watch?v={full_id}", None
 
     return url, None
 
@@ -330,8 +380,10 @@ def verify_download_integrity(filepath, is_audio=False):
                 return False, "File container verification failed (no decodable stream)."
             if not is_audio and "video" not in stream_types and "audio" not in stream_types:
                 return False, "File container verification failed (stream unreadable)."
+            if is_audio and "audio" not in stream_types:
+                return False, "File container verification failed (no decodable audio stream)."
         except subprocess.TimeoutExpired:
-            pass
+            return False, "File verification timed out (file container or disk is unreadable)."
         except Exception:
             pass
 
@@ -347,6 +399,22 @@ def _score_movie_candidate(c, canonical_title, year=None, cast_names=None):
     title_lower = (c.get("title") or "").lower()
     uploader_lower = (c.get("uploader") or c.get("channel") or "").lower()
     dur = c.get("duration") or 0
+    if isinstance(dur, str):
+        try:
+            if ":" in dur:
+                parts = [int(p) for p in dur.split(":")]
+                if len(parts) == 3:
+                    dur = parts[0] * 3600 + parts[1] * 60 + parts[2]
+                elif len(parts) == 2:
+                    dur = parts[0] * 60 + parts[1]
+                else:
+                    dur = 0
+            else:
+                dur = int(float(dur))
+        except Exception:
+            dur = 0
+    elif not isinstance(dur, (int, float)):
+        dur = 0
 
     # Must be a full-length release (at least 40 minutes if duration is known)
     if 0 < dur < 2400:
@@ -467,6 +535,8 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
     release_year = None
     cast_names = []
 
+    media_type = None
+
     # Check for IMDb title ID (e.g. tt1833673)
     m_imdb = re.search(r'/title/(tt\d+)', url)
     if m_imdb:
@@ -476,6 +546,7 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
         if items:
             title = items[0].get("title")
             release_year = items[0].get("year")
+            media_type = items[0].get("type")
             raw_cast = items[0].get("cast") or ""
             if raw_cast:
                 cast_names = [c.strip() for c in raw_cast.split(",") if c.strip()]
@@ -518,24 +589,35 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
     from .search import search_videos, search_dailymotion, search_archive_org, _clean_title_for_catalog
     clean_name = _clean_title_for_catalog(title)
     clean_query = re.sub(r'\s*\(\d{4}\)', '', clean_name).strip()
+    is_tv = bool(media_type and ("tv" in str(media_type).lower() or "series" in str(media_type).lower()))
+    search_suffix = "full episode" if is_tv else "full movie"
+
     if status_callback:
-        status_callback(f"Authenticating verified movie release for '{clean_name}'...", 10)
+        status_callback(f"Authenticating verified media release for '{clean_name}'...", 10)
 
     # Harvest candidates across multiple video platforms
     candidates = []
     try:
-        dm_candidates = search_dailymotion(f"{clean_query} full movie", count=6, use_stealth=use_stealth)
+        dm_candidates = search_dailymotion(f"{clean_query} {search_suffix}", count=6, use_stealth=use_stealth)
         if dm_candidates:
             candidates.extend(dm_candidates)
     except Exception:
         pass
 
     try:
-        yt_candidates = search_videos(f"{clean_query} full movie", count=6, provider="youtube", use_stealth=use_stealth)
+        yt_candidates = search_videos(f"{clean_query} {search_suffix}", count=6, provider="youtube", use_stealth=use_stealth)
         if yt_candidates:
             candidates.extend(yt_candidates)
     except Exception:
         pass
+
+    if not candidates:
+        try:
+            yt_fallback = search_videos(clean_query, count=6, provider="youtube", use_stealth=use_stealth)
+            if yt_fallback:
+                candidates.extend(yt_fallback)
+        except Exception:
+            pass
 
     try:
         arch_candidates = search_archive_org(clean_query, count=3)
@@ -565,6 +647,246 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
     return None
 
 
+def is_playlist_url(url):
+    """
+    Check if a URL points to a multi-item playlist or collection.
+    Matches YouTube playlists, Soundcloud sets, Dailymotion playlists, Bilibili series, etc.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    u = url.lower().strip()
+    if "list=" in u:
+        if "list=wl" in u or "list=ll" in u:
+            return False
+        return True
+    if any(m in u for m in ("/playlist", "/sets/", "/album/", "/channel/", "/c/")):
+        return True
+    return False
+
+
+def _find_existing_video(output_path, video_id, is_audio=False):
+    """
+    Scan output_path for a file whose name contains '[video_id]'.
+    Returns the path if the file exists and passes integrity check,
+    returns 'corrupt' if the file exists but is damaged (caller should delete it),
+    or None if no matching file is found.
+    """
+    if not video_id or not os.path.isdir(output_path):
+        return None
+    needle = f"[{video_id}]"
+    try:
+        for fname in os.listdir(output_path):
+            if needle in fname:
+                fpath = os.path.join(output_path, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                valid, _err = verify_download_integrity(fpath, is_audio=is_audio)
+                if valid:
+                    return fpath
+                else:
+                    return "corrupt"
+    except OSError:
+        pass
+    return None
+
+
+def download_playlist_sequential(url, output_path, quality="4k", progress_hook=None,
+                                 postprocessor_hook=None, use_turbo=True, cookies_from_browser=None,
+                                 status_callback=None, use_stealth=True, cancel_check=None):
+    """
+    Download each video in a playlist sequentially:
+    Each video is downloaded into its own isolated stage, verified, and immediately
+    moved into output_path before moving to the next.
+    Files are named with zero-padded playlist indices (01 - Title.mp4).
+    Failed items are skipped without aborting remaining items.
+    """
+    def _abort_if_cancelled():
+        if cancel_check and cancel_check():
+            raise (DownloadCancelled() if DownloadCancelled else RuntimeError("Cancelled"))
+
+    _abort_if_cancelled()
+    from .playlist import inspect_playlist
+    try:
+        meta = inspect_playlist(url)
+    except Exception:
+        return None
+
+    entries = (meta or {}).get("entries") or []
+    if not entries:
+        return None
+
+    if len(entries) == 1:
+        single_url = entries[0].get("url") or url
+        clean_url = re.sub(r'[?&]list=[^&]+', '', single_url)
+        return download_media(
+            clean_url, output_path, quality=quality,
+            progress_hook=progress_hook, postprocessor_hook=postprocessor_hook,
+            use_turbo=use_turbo, cookies_from_browser=cookies_from_browser,
+            status_callback=status_callback, use_stealth=use_stealth,
+            cancel_check=cancel_check
+        )
+
+    playlist_title = meta.get("title") or "Playlist"
+    total = len(entries)
+    pad = 2 if total < 100 else 3
+    downloaded_files = []
+    failed_items = []
+
+    if status_callback:
+        status_callback(f"Playlist verified: '{playlist_title}' ({total} videos). Starting sequential 1-by-1 download...", 3)
+
+    for idx, entry in enumerate(entries, 1):
+        _abort_if_cancelled()
+        item_url = entry.get("url")
+        item_id = entry.get("id") or ""
+        item_title = entry.get("title") or f"Video {idx}"
+        prefix = f"{idx:0{pad}d} - "
+        is_audio = quality == "audio"
+
+        pct_base = int(((idx - 1) / total) * 100)
+        pct_done = int((idx / total) * 100)
+
+        # ── Smart-resume: check if this video is already on disk ──────────────
+        if item_id:
+            existing = _find_existing_video(output_path, item_id, is_audio=is_audio)
+            if existing and existing != "corrupt":
+                # Already downloaded and healthy — skip it.
+                downloaded_files.append(existing)
+                if status_callback:
+                    short_title = item_title[:40]
+                    status_callback(
+                        f"[{idx}/{total}] ✓ Already downloaded: {short_title} — skipping.",
+                        pct_done,
+                    )
+                # Feed a synthetic 100% progress tick so the UI bar advances.
+                if progress_hook:
+                    try:
+                        progress_hook({
+                            "status": "finished",
+                            "downloaded_bytes": int((idx / total) * 100000000),
+                            "total_bytes": 100000000,
+                            "total_bytes_estimate": 100000000,
+                            "info_dict": {"title": f"[{idx}/{total}] {item_title}"},
+                        })
+                    except Exception:
+                        pass
+                continue
+            elif existing == "corrupt":
+                # Corrupted leftover — delete it so we re-download fresh.
+                try:
+                    os.remove(existing)
+                except OSError:
+                    pass
+                if status_callback:
+                    status_callback(
+                        f"[{idx}/{total}] Corrupt file detected for '{item_title[:30]}' — re-downloading...",
+                        max(1, pct_base),
+                    )
+        # ─────────────────────────────────────────────────────────────────────
+
+        if status_callback:
+            status_callback(f"[{idx}/{total}] Downloading: {prefix}{item_title}...", max(1, pct_base))
+
+        session_id = uuid.uuid4().hex[:10]
+        stage_dir = os.path.join(tempfile.gettempdir(), f"studio_stage_{session_id}")
+        temp_dir = os.path.join(tempfile.gettempdir(), f"studio_chunks_{session_id}")
+        os.makedirs(stage_dir, exist_ok=True)
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # Create a per-item progress hook that scales progress across the entire playlist
+        item_hook = None
+        if progress_hook:
+            def _scaled_hook(d, current_idx=idx, item_t=item_title):
+                try:
+                    d_copy = dict(d)
+                    info_copy = dict(d.get("info_dict") or {})
+                    info_copy["title"] = f"[{current_idx}/{total}] {item_t}"
+                    d_copy["info_dict"] = info_copy
+
+                    total_b = d.get("total_bytes") or d.get("total_bytes_estimate")
+                    down_b = d.get("downloaded_bytes") or 0
+                    if total_b and total_b > 0:
+                        item_frac = min(1.0, max(0.0, down_b / total_b))
+                    elif d.get("fragment_count"):
+                        item_frac = min(1.0, max(0.0, (d.get("fragment_index") or 0) / max(1, d["fragment_count"])))
+                    else:
+                        item_frac = 0.0
+
+                    overall_frac = min(0.99, max(0.0, ((current_idx - 1) + item_frac) / total))
+                    d_copy["downloaded_bytes"] = int(overall_frac * 100000000)
+                    d_copy["total_bytes"] = 100000000
+                    d_copy["total_bytes_estimate"] = 100000000
+                    progress_hook(d_copy)
+                except Exception:
+                    pass
+            item_hook = _scaled_hook
+
+        ydl_opts = build_engine_opts(
+            stage_dir, temp_dir, quality=quality,
+            progress_hook=item_hook if item_hook else progress_hook,
+            postprocessor_hook=postprocessor_hook,
+            use_turbo=use_turbo,
+            cookies_from_browser=cookies_from_browser,
+            use_stealth=use_stealth
+        )
+        ydl_opts["noplaylist"] = True
+        ydl_opts["outtmpl"] = {"default": f"{prefix}%(title).180s [%(id)s].%(ext)s"}
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(item_url, download=True)
+            _abort_if_cancelled()
+
+            staged_path = resolve_filepath(info)
+            primary_name = os.path.basename(staged_path) if staged_path else None
+            final_path = _move_into(output_path, stage_dir, primary_name)
+
+            if final_path and os.path.exists(final_path):
+                valid, err = verify_download_integrity(final_path, is_audio=is_audio)
+                if not valid:
+                    failed_items.append({"index": idx, "title": item_title, "error": f"Damaged file: {err}"})
+                else:
+                    downloaded_files.append(final_path)
+                    saved_name = os.path.basename(final_path)
+                    if status_callback:
+                        status_callback(f"[{idx}/{total}] Saved: {saved_name} ✅", pct_done)
+            else:
+                failed_items.append({"index": idx, "title": item_title, "error": "No playable output produced"})
+        except Exception as item_err:
+            if cancel_check and cancel_check():
+                raise (DownloadCancelled() if DownloadCancelled else RuntimeError("Cancelled"))
+            failed_items.append({"index": idx, "title": item_title, "error": str(item_err)})
+            if status_callback:
+                status_callback(f"[{idx}/{total}] Skipped ({item_title[:28]}): {str(item_err)[:60]}", int((idx / total) * 100))
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    _abort_if_cancelled()
+
+    if not downloaded_files and failed_items:
+        first_err = failed_items[0].get("error", "Unknown error")
+        raise RuntimeError(f"None of the {total} playlist videos could be downloaded. First error: {first_err}")
+
+    summary_msg = f"Saved {len(downloaded_files)} of {total} playlist video(s) directly to destination."
+    if failed_items:
+        summary_msg += f" ({len(failed_items)} item(s) skipped)"
+
+    return {
+        "title": playlist_title,
+        "is_playlist": True,
+        "filepath": downloaded_files[0] if downloaded_files else None,
+        "filename": os.path.basename(downloaded_files[0]) if downloaded_files else None,
+        "requested_downloads": [{"filepath": f} for f in downloaded_files],
+        "downloaded_files": downloaded_files,
+        "failed_items": failed_items,
+        "total_items": total,
+        "success_count": len(downloaded_files),
+        "failed_count": len(failed_items),
+        "message": summary_msg,
+    }
+
+
 def download_media(url, output_path, quality="4k", progress_hook=None,
                    postprocessor_hook=None, use_turbo=True, cookies_from_browser=None,
                    status_callback=None, use_stealth=True, cancel_check=None):
@@ -573,12 +895,30 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
     then relocate safely into the destination folder without leaving temp clutter.
     If 403 Forbidden or platform locks are encountered, automatically fall back to
     the StealthStreamInterceptor to bypass Cloudflare and stream protections.
+    If the URL points to a multi-item playlist, downloads and saves each video one-by-one directly.
     """
     def _abort_if_cancelled():
         if cancel_check and cancel_check():
             raise (DownloadCancelled() if DownloadCancelled else RuntimeError("Cancelled"))
 
     _abort_if_cancelled()
+
+    if is_playlist_url(url):
+        pl_res = download_playlist_sequential(
+            url,
+            output_path=output_path,
+            quality=quality,
+            progress_hook=progress_hook,
+            postprocessor_hook=postprocessor_hook,
+            use_turbo=use_turbo,
+            cookies_from_browser=cookies_from_browser,
+            status_callback=status_callback,
+            use_stealth=use_stealth,
+            cancel_check=cancel_check,
+        )
+        if pl_res:
+            return pl_res
+
     resolved_url, query_term = normalize_url(url)
     if not resolved_url:
         # User entered a search query instead of a direct link.
@@ -689,6 +1029,30 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
                     downloads[0]["filepath"] = final_path
                 else:
                     info["filepath"] = final_path
+                    info["requested_downloads"] = [{"filepath": final_path}]
+
+        # Trailer / short preview check:
+        # If the user provided a web URL and the downloaded file is a short preview or has trailer markers,
+        # escalate to StealthStreamInterceptor to find and download the authentic full-length video!
+        if use_stealth and final_path and (url.startswith("http://") or url.startswith("https://")):
+            dur = (info.get("duration") or 0) if isinstance(info, dict) else 0
+            title_text = ((info.get("title") or "") + " " + os.path.basename(final_path)).lower()
+            is_trailer_marker = any(k in title_text for k in ("trailer", "teaser", "preview", "sample", "promo"))
+            is_short_preview = (dur > 0 and dur <= 65 and is_trailer_marker) or (is_trailer_marker and "youtube.com" not in url.lower())
+            if is_short_preview:
+                if status_callback:
+                    status_callback("Preview / trailer detected. Engaging Stealth Stream Interceptor for complete video...", 20)
+                try:
+                    from .stealth_sniffer import StealthStreamInterceptor
+                    interceptor = StealthStreamInterceptor(
+                        output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
+                    )
+                    full_res = interceptor.bypass_and_extract(url, quality=quality)
+                    if full_res and full_res.get("filepath") and os.path.exists(full_res["filepath"]):
+                        return full_res
+                except Exception as stealth_ex:
+                    if DownloadCancelled and isinstance(stealth_ex, DownloadCancelled):
+                        raise
 
         return info
     except Exception as e:
@@ -716,12 +1080,13 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             )
 
         is_locked_or_blocked = any(k in err_str for k in [
-            "403", "forbidden", "cloudflare", "bot", "protected", "login", "authenticate", "udemy"
+            "403", "forbidden", "cloudflare", "bot", "protected", "login", "authenticate", "udemy",
+            "unsupported url", "no video formats", "unable to extract", "extractor", "blocked", "access denied"
         ])
 
         if use_stealth and is_locked_or_blocked and (url.startswith("http://") or url.startswith("https://")):
             if status_callback:
-                status_callback("Cloudflare / Platform lock detected. Activating Stealth Stream Interceptor...", 15)
+                status_callback("Platform lock / stream protection detected. Activating Stealth Stream Interceptor...", 15)
             from .stealth_sniffer import StealthStreamInterceptor
             interceptor = StealthStreamInterceptor(
                 output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
