@@ -667,12 +667,13 @@ def is_playlist_url(url):
 def _find_existing_video(output_path, video_id, is_audio=False):
     """
     Scan output_path for a file whose name contains '[video_id]'.
-    Returns the path if the file exists and passes integrity check,
-    returns 'corrupt' if the file exists but is damaged (caller should delete it),
-    or None if no matching file is found.
+    Returns a (path, status) tuple:
+      - (path, 'ok')      — file exists and passes integrity check → safe to skip
+      - (path, 'corrupt') — file exists but is damaged → caller should delete and re-download
+      - (None, None)      — no matching file found
     """
     if not video_id or not os.path.isdir(output_path):
-        return None
+        return None, None
     needle = f"[{video_id}]"
     try:
         for fname in os.listdir(output_path):
@@ -682,12 +683,12 @@ def _find_existing_video(output_path, video_id, is_audio=False):
                     continue
                 valid, _err = verify_download_integrity(fpath, is_audio=is_audio)
                 if valid:
-                    return fpath
+                    return fpath, "ok"
                 else:
-                    return "corrupt"
+                    return fpath, "corrupt"
     except OSError:
         pass
-    return None
+    return None, None
 
 
 def download_playlist_sequential(url, output_path, quality="4k", progress_hook=None,
@@ -748,10 +749,10 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
 
         # ── Smart-resume: check if this video is already on disk ──────────────
         if item_id:
-            existing = _find_existing_video(output_path, item_id, is_audio=is_audio)
-            if existing and existing != "corrupt":
+            existing_path, existing_status = _find_existing_video(output_path, item_id, is_audio=is_audio)
+            if existing_status == "ok":
                 # Already downloaded and healthy — skip it.
-                downloaded_files.append(existing)
+                downloaded_files.append(existing_path)
                 if status_callback:
                     short_title = item_title[:40]
                     status_callback(
@@ -771,10 +772,10 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
                     except Exception:
                         pass
                 continue
-            elif existing == "corrupt":
-                # Corrupted leftover — delete it so we re-download fresh.
+            elif existing_status == "corrupt":
+                # Corrupted leftover — delete it (using the real path) so we re-download fresh.
                 try:
-                    os.remove(existing)
+                    os.remove(existing_path)
                 except OSError:
                     pass
                 if status_callback:
