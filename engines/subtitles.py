@@ -15,33 +15,62 @@ SUBTITLE_EXTS = (".srt", ".vtt", ".ass", ".ssa", ".ttml", ".sbv", ".lrc", ".json
 
 # 00:01:23.456 --> 00:01:25.789 align:start position:0%
 _CUE_RE = re.compile(
-    r"^(?P<start>(?:\d{1,3}:)?\d{1,2}:\d{2}[.,]\d{1,3})\s*-->\s*"
-    r"(?P<end>(?:\d{1,3}:)?\d{1,2}:\d{2}[.,]\d{1,3})(?P<settings>.*)$"
+    r"^(?P<start>(?:\d{1,3}:)?\d{1,2}:\d{2}[.,]\d+)\s*-->\s*"
+    r"(?P<end>(?:\d{1,3}:)?\d{1,2}:\d{2}[.,]\d+)(?P<settings>.*)$"
 )
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _normalise_timestamp(ts):
     """VTT allows MM:SS.mmm; SRT always wants HH:MM:SS,mmm."""
-    ts = ts.strip().replace(".", ",")
-    parts = ts.split(":")
-    if len(parts) == 2:
-        parts = ["00"] + parts
-    h, m, rest = parts[0], parts[1], parts[2]
-    sec, _, ms = rest.partition(",")
-    ms = (ms + "000")[:3]
-    return f"{int(h):02d}:{int(m):02d}:{int(sec):02d},{ms}"
+    try:
+        ts = str(ts or "").strip().replace(".", ",")
+        parts = ts.split(":")
+        if len(parts) == 2:
+            parts = ["00"] + parts
+        if len(parts) != 3:
+            return "00:00:00,000"
+        h, m, rest = parts[0], parts[1], parts[2]
+        sec, _, ms = rest.partition(",")
+        ms = (ms + "000")[:3]
+        return f"{int(h):02d}:{int(m):02d}:{int(sec):02d},{ms}"
+    except Exception:
+        return "00:00:00,000"
 
 
 def _clean_payload(lines):
+    import html
     out = []
     for raw in lines:
         text = _TAG_RE.sub("", raw).strip()
-        # &nbsp; and friends show up in auto-generated captions.
-        text = text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        text = html.unescape(text).replace("\xa0", " ")
+        for zw in ("\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u200b", "\ufeff"):
+            text = text.replace(zw, "")
+        text = text.strip()
         if text:
             out.append(text)
     return out
+
+
+def read_subtitle_text(filepath):
+    """Read subtitle file with automatic character encoding detection."""
+    try:
+        with open(filepath, "rb") as f:
+            raw = f.read()
+
+        if raw.startswith(b"\xef\xbb\xbf"):
+            return raw.decode("utf-8-sig", errors="replace")
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            return raw.decode("utf-16", errors="replace")
+
+        for enc in ("utf-8", "cp1256", "cp1252", "iso-8859-1"):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
 
 
 def parse_vtt_cues(text):
@@ -91,6 +120,67 @@ def parse_vtt_cues(text):
     return [c for c in cues if c[2]]
 
 
+def _ms_to_ts(ms):
+    """Convert milliseconds to SRT-format timestamp HH:MM:SS,mmm."""
+    h = ms // 3600000
+    m_rem = ms % 3600000
+    mi = m_rem // 60000
+    s_rem = m_rem % 60000
+    s = s_rem // 1000
+    rem = s_rem % 1000
+    return f"{h:02d}:{mi:02d}:{s:02d},{rem:03d}"
+
+
+def parse_ttml_cues(xml_text):
+    """Parse TTML / YouTube XML auto-captions into [(start, end, [lines]), ...]."""
+    cues = []
+    pattern1 = re.compile(
+        r'<p[^>]*?\bbegin=["\']([^"\']+)["\'][^>]*?\bend=["\']([^"\']+)["\'][^>]*>(.*?)</p>',
+        re.DOTALL | re.IGNORECASE,
+    )
+    for m in pattern1.finditer(xml_text):
+        start = _normalise_timestamp(m.group(1))
+        end = _normalise_timestamp(m.group(2))
+        body = m.group(3).replace("<br/>", "\n").replace("<br />", "\n").replace("<br>", "\n")
+        lines = _clean_payload(body.splitlines())
+        if lines:
+            cues.append((start, end, lines))
+
+    if not cues:
+        pattern2 = re.compile(
+            r'<p[^>]*?\bt=["\'](\d+)["\'][^>]*?\bd=["\'](\d+)["\'][^>]*>(.*?)</p>',
+            re.DOTALL | re.IGNORECASE,
+        )
+        for m in pattern2.finditer(xml_text):
+            t_ms = int(m.group(1))
+            d_ms = int(m.group(2))
+            start = _ms_to_ts(t_ms)
+            end = _ms_to_ts(t_ms + d_ms)
+            body = m.group(3).replace("<br/>", "\n").replace("<br />", "\n").replace("<br>", "\n")
+            lines = _clean_payload(body.splitlines())
+            if lines:
+                cues.append((start, end, lines))
+    return cues
+
+
+def _convert_ttml_to_srt(ttml_path, srt_path):
+    """Convert a TTML / XML subtitle file to SubRip."""
+    try:
+        content = read_subtitle_text(ttml_path)
+        cues = _dedupe_rolling(parse_ttml_cues(content))
+        if not cues:
+            return False
+
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for idx, (start, end, lines) in enumerate(cues, 1):
+                f.write(f"{idx}\n{start} --> {end}\n")
+                f.write("\n".join(lines))
+                f.write("\n\n")
+        return True
+    except Exception:
+        return False
+
+
 def _dedupe_rolling(cues):
     """
     Drop the duplicate cues YouTube emits for rolling auto-captions.
@@ -113,9 +203,7 @@ def _dedupe_rolling(cues):
 def _convert_vtt_to_srt(vtt_path, srt_path):
     """Convert a WebVTT file to SubRip. Returns True when cues were written."""
     try:
-        with open(vtt_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-
+        content = read_subtitle_text(vtt_path)
         cues = _dedupe_rolling(parse_vtt_cues(content))
         if not cues:
             return False
@@ -229,17 +317,25 @@ def extract_subtitles(url, lang="en", output_path="Downloads"):
 
         dest_name = os.path.basename(os.path.normpath(output_path)) or "destination"
 
-        # Pure-Python fallback for anything FFmpeg did not already convert.
+        # Pure-Python fallback for anything FFmpeg did not already convert (.vtt and .ttml/.xml).
         for f in sorted(os.listdir(stage_dir)):
-            if not f.lower().endswith(".vtt"):
-                continue
-            vtt_full = os.path.join(stage_dir, f)
-            srt_full = os.path.splitext(vtt_full)[0] + ".srt"
-            if os.path.exists(srt_full):
-                _remove_quietly(vtt_full)
-                continue
-            if _convert_vtt_to_srt(vtt_full, srt_full):
-                _remove_quietly(vtt_full)
+            fl = f.lower()
+            if fl.endswith(".vtt"):
+                vtt_full = os.path.join(stage_dir, f)
+                srt_full = os.path.splitext(vtt_full)[0] + ".srt"
+                if os.path.exists(srt_full):
+                    _remove_quietly(vtt_full)
+                    continue
+                if _convert_vtt_to_srt(vtt_full, srt_full):
+                    _remove_quietly(vtt_full)
+            elif fl.endswith((".ttml", ".xml", ".srv3")):
+                ttml_full = os.path.join(stage_dir, f)
+                srt_full = os.path.splitext(ttml_full)[0] + ".srt"
+                if os.path.exists(srt_full):
+                    _remove_quietly(ttml_full)
+                    continue
+                if _convert_ttml_to_srt(ttml_full, srt_full):
+                    _remove_quietly(ttml_full)
 
         # Relocate the finished subtitle files into the destination folder.
         for f in sorted(os.listdir(stage_dir)):
@@ -254,8 +350,27 @@ def extract_subtitles(url, lang="en", output_path="Downloads"):
             while os.path.exists(dst):
                 dst = os.path.join(output_path, f"{base} ({counter}){ext}")
                 counter += 1
-            shutil.move(src, dst)
-            saved_files.append(dst)
+            moved = False
+            for attempt in range(6):
+                try:
+                    shutil.move(src, dst)
+                    moved = True
+                    break
+                except (PermissionError, OSError):
+                    if attempt < 5:
+                        time.sleep(0.3)
+                    else:
+                        try:
+                            shutil.copy2(src, dst)
+                            try:
+                                os.remove(src)
+                            except Exception:
+                                pass
+                            moved = True
+                        except Exception:
+                            pass
+            if moved or os.path.exists(dst):
+                saved_files.append(dst)
 
         if not saved_files:
             raise RuntimeError(

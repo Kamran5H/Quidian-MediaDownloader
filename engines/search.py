@@ -23,13 +23,14 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 
 def _clean_platform_search_query(query):
     """
-    Cleans queries like 'Dhoom 3 from Netflix' or 'Inception on Prime Video'
+    Cleans queries like 'Dhoom 3 from Netflix' or 'watch Inception on Prime Video'
     into clean media titles like 'Dhoom 3' or 'Inception'.
     """
     if not query:
         return ""
     patterns = [
-        r'\b(?:from|on|at|in)\s+(?:netflix|amazon\s*prime\s*video|prime\s*video|amazon\s*prime|amazon|prime|imdb|disney(?:\s*\+)?|hulu|hbo\s*max|max|apple\s*tv(?:\s*\+)?|peacock|paramount(?:\s*\+)?)(\b|$)',
+        r'^(?:watch|download|stream|find)\s+',
+        r'\b(?:from|on|at|in)\s+(?:netflix|amazon\s*prime\s*video|prime\s*video|amazon\s*prime|amazon|prime|imdb|disney(?:\s*\+)?|hulu|hbo\s*max|hbo|max|apple\s*tv(?:\s*\+)?|peacock|paramount(?:\s*\+)?)(\b|$)',
         r'\b(?:netflix|amazon\s*prime\s*video|prime\s*video|amazon\s*prime|amazon|prime|imdb|disney(?:\s*\+)?|hulu|hbo|apple\s*tv)\s+(?:movie|film|series|show|video)\b',
     ]
     c = query
@@ -108,10 +109,10 @@ _SKIP_HOSTS = ("wikipedia.org", "duckduckgo.com", "bing.com", "google.com")
 STEALTH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua": '"Chromium";v="131", "Google Chrome";v="131", "Not-A.Brand";v="24"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "document",
@@ -188,7 +189,9 @@ def _detect_intent(query):
         return "full_movie"
     if any(w in q for w in ("full video", "full vedio", "full length", "complete video", "entire video", "full show", "full episode", "full lecture", "full tutorial")):
         return "full_video"
-    if "movie" in q or "film" in q or "cinema" in q:
+    if any(w in q for w in ("tutorial", "how to", "guide", "lecture", "lesson", "course", "review", "reaction", "interview", "podcast", "photography", "camera", "editing", "sound design")):
+        return "general"
+    if re.search(r'\b(?:movie|film|cinema)\b', q):
         return "movie"
     if any(w in q for w in ("trailer", "teaser")):
         return "trailer"
@@ -203,10 +206,14 @@ def _score_entry(entry, query, intent):
     title = entry.get("title") or ""
     tl = title.lower()
     uploader = (entry.get("uploader") or entry.get("channel") or "").lower()
-    q = query.lower().strip()
+    q = (query or "").lower().strip()
     qtokens = _norm_tokens(query)
     ttokens = _norm_tokens(title)
     dur = entry.get("duration") or 0
+    if isinstance(dur, str):
+        dur = _parse_time_str(dur) or 0
+    elif not isinstance(dur, (int, float)):
+        dur = 0
 
     # -----------------------------------------------------------------------
     # CRITICAL ZERO-TOLERANCE FILTER: FULL VIDEO & MOVIE QUERIES
@@ -323,13 +330,15 @@ def _parse_time_str(time_str):
     if not time_str:
         return None
     try:
-        parts = [int(p) for p in str(time_str).strip().split(":")]
+        parts = [float(p) for p in str(time_str).strip().split(":")]
         if len(parts) == 1:
-            return parts[0]
+            return int(parts[0]) if parts[0].is_integer() else parts[0]
         elif len(parts) == 2:
-            return parts[0] * 60 + parts[1]
+            val = parts[0] * 60 + parts[1]
+            return int(val) if isinstance(val, float) and val.is_integer() else val
         elif len(parts) == 3:
-            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+            val = parts[0] * 3600 + parts[1] * 60 + parts[2]
+            return int(val) if isinstance(val, float) and val.is_integer() else val
     except Exception:
         pass
     return None
@@ -456,8 +465,7 @@ def _stealth_youtube_search(query, count=8):
                 })
 
         return entries
-    except Exception as e:
-        print(f"[Stealth Search] YouTube stealth query error: {e}")
+    except Exception:
         return []
 
 
@@ -518,6 +526,10 @@ def search_videos(query, count=8, provider="youtube", use_stealth=True):
         if entry.get("live_status") in ("is_live", "is_upcoming"):
             continue
         if entry.get("availability") in ("private", "premium_only", "subscriber_only", "needs_auth"):
+            continue
+        # Drop YouTube Shorts (vertical ≤60s clips) - they are never full-length media
+        entry_url = entry.get("url") or ""
+        if "/shorts/" in entry_url:
             continue
 
         thumb = entry.get("thumbnail")
@@ -751,8 +763,7 @@ def _stealth_web_search(query, count=8):
                 "stealth_protected": True,
             })
         return results[:int(count)]
-    except Exception as e:
-        print(f"[Stealth Web Search] Fallback error: {e}")
+    except Exception:
         return []
 
 
@@ -820,20 +831,27 @@ def search_imdb(query, count=3):
     """
     try:
         clean_q = _clean_title_for_catalog(query) or query
-        clean = re.sub(r'[^a-zA-Z0-9\s]', '', clean_q).strip()
+        clean = re.sub(r'[^\w\s\-]', '', clean_q, flags=re.UNICODE).strip()
         slug = urllib.parse.quote(clean.lower().replace(" ", "_"))
         url = f"https://v3.sg.media-imdb.com/suggestion/x/{slug}.json"
         
         headers = STEALTH_HEADERS.copy() if CURL_CFFI_AVAILABLE else {'User-Agent': 'Mozilla/5.0'}
         data = {}
         if CURL_CFFI_AVAILABLE:
-            resp = cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-        else:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                data = json.loads(r.read().decode('utf-8'))
+            try:
+                resp = cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+            except Exception:
+                data = {}
+
+        if not data:
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read().decode('utf-8'))
+            except Exception:
+                data = {}
                 
         items = data.get('d', [])
         results = []

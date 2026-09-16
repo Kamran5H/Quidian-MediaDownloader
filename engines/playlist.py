@@ -43,6 +43,11 @@ def inspect_playlist(url, limit=MAX_PLAYLIST_ITEMS):
     raw_entries = data.get("entries")
     if raw_entries is None:
         raw_entries = [data]
+    elif not isinstance(raw_entries, list):
+        try:
+            raw_entries = list(raw_entries)
+        except Exception:
+            raw_entries = []
 
     for idx, item in enumerate(raw_entries, 1):
         if not item:
@@ -63,6 +68,8 @@ def inspect_playlist(url, limit=MAX_PLAYLIST_ITEMS):
         if not thumb and vid and "youtube" in str(entry_url).lower():
             thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
 
+        is_upcoming = item.get("live_status") == "is_upcoming"
+
         entries.append({
             "index": len(entries) + 1,
             "id": vid,
@@ -71,6 +78,7 @@ def inspect_playlist(url, limit=MAX_PLAYLIST_ITEMS):
             "duration": item.get("duration"),
             "uploader": item.get("uploader") or item.get("channel"),
             "thumbnail": thumb,
+            "is_upcoming": is_upcoming,
         })
 
     if not entries:
@@ -94,8 +102,9 @@ def download_batch(urls, output_path, quality="4k", on_item_start=None,
     total = len(urls)
     for i, url in enumerate(urls, 1):
         if cancel_check and cancel_check():
-            results.append({"url": url, "status": "cancelled"})
-            continue
+            for rem_url in urls[i - 1:]:
+                results.append({"url": rem_url, "status": "cancelled"})
+            break
         if on_item_start:
             on_item_start(i, total, url)
         try:

@@ -71,14 +71,391 @@ function selectPresetPath(key, btn) {
         currentDestination = presetPaths[key];
         localStorage.setItem("quidian_dest", currentDestination);
         updateDestinationDisplay();
+        loadExplorerPath(currentDestination);
+    }
+}
+
+let folderSearchDebounce = null;
+let activeSuggestionIndex = -1;
+
+function initFolderSearchSystem() {
+    const input = document.getElementById("modal-dest-input");
+    const dropdown = document.getElementById("dest-suggestions");
+    if (!input || !dropdown) return;
+
+    input.addEventListener("input", () => {
+        clearTimeout(folderSearchDebounce);
+        const query = input.value.trim();
+        folderSearchDebounce = setTimeout(() => {
+            fetchFolderSuggestions(query);
+        }, 180);
+    });
+
+    input.addEventListener("focus", () => {
+        const q = input.value.trim();
+        if (q && q !== currentDestination) {
+            fetchFolderSuggestions(q);
+        } else {
+            hideFolderSuggestions();
+        }
+    });
+
+    input.addEventListener("keydown", (e) => {
+        const items = dropdown.querySelectorAll(".dest-suggestion-item");
+        if (!items.length || dropdown.classList.contains("hidden")) {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                confirmDestinationDownload();
+            }
+            return;
+        }
+
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            activeSuggestionIndex = (activeSuggestionIndex + 1) % items.length;
+            updateActiveSuggestion(items);
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            activeSuggestionIndex = (activeSuggestionIndex - 1 + items.length) % items.length;
+            updateActiveSuggestion(items);
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            if (activeSuggestionIndex >= 0 && items[activeSuggestionIndex]) {
+                items[activeSuggestionIndex].click();
+            } else {
+                confirmDestinationDownload();
+            }
+        } else if (e.key === "Escape") {
+            hideFolderSuggestions();
+        }
+    });
+
+    document.addEventListener("click", (e) => {
+        if (!input.contains(e.target) && !dropdown.contains(e.target)) {
+            hideFolderSuggestions();
+        }
+    });
+}
+
+function updateActiveSuggestion(items) {
+    items.forEach((item, idx) => {
+        if (idx === activeSuggestionIndex) {
+            item.classList.add("active");
+            item.scrollIntoView({ block: "nearest" });
+        } else {
+            item.classList.remove("active");
+        }
+    });
+}
+
+function hideFolderSuggestions() {
+    const dropdown = document.getElementById("dest-suggestions");
+    if (dropdown) dropdown.classList.add("hidden");
+    activeSuggestionIndex = -1;
+}
+
+async function fetchFolderSuggestions(query) {
+    const dropdown = document.getElementById("dest-suggestions");
+    if (!dropdown) return;
+
+    try {
+        const res = await fetch(`/api/search_folders?query=${encodeURIComponent(query || "")}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const results = data.results || [];
+        renderFolderSuggestions(results);
+    } catch (err) {
+        console.warn("Folder suggestion fetch error:", err);
+    }
+}
+
+function renderFolderSuggestions(results) {
+    const dropdown = document.getElementById("dest-suggestions");
+    const input = document.getElementById("modal-dest-input");
+    if (!dropdown || !input) return;
+
+    if (!results || results.length === 0) {
+        dropdown.classList.add("hidden");
+        return;
+    }
+
+    dropdown.innerHTML = "";
+    activeSuggestionIndex = -1;
+
+    results.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "dest-suggestion-item";
+
+        const icon = document.createElement("span");
+        icon.className = "dest-suggestion-icon";
+        icon.textContent = item.can_create ? "➕" : (item.name.includes(":") ? "💾" : "📁");
+
+        const info = document.createElement("div");
+        info.className = "dest-suggestion-info";
+
+        const name = document.createElement("span");
+        name.className = "dest-suggestion-name" + (item.can_create ? " dest-suggestion-new" : "");
+        name.textContent = item.name;
+
+        const path = document.createElement("span");
+        path.className = "dest-suggestion-path";
+        path.textContent = item.path;
+
+        info.appendChild(name);
+        info.appendChild(path);
+        row.appendChild(icon);
+        row.appendChild(info);
+
+        row.addEventListener("mousedown", async (e) => {
+            e.preventDefault();
+            if (item.can_create) {
+                try {
+                    const cRes = await fetch("/api/create_folder", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ path: item.path })
+                    });
+                    const cData = await cRes.json();
+                    currentDestination = cData.path || item.path;
+                } catch {
+                    currentDestination = item.path;
+                }
+            } else {
+                currentDestination = item.path;
+            }
+            input.value = currentDestination;
+            localStorage.setItem("quidian_dest", currentDestination);
+            updateDestinationDisplay();
+            hideFolderSuggestions();
+        });
+
+        dropdown.appendChild(row);
+    });
+
+    dropdown.classList.remove("hidden");
+}
+
+let currentExplorerPath = "";
+let currentExplorerParent = null;
+
+async function loadExplorerPath(targetPath) {
+    const listEl = document.getElementById("explorer-folder-list");
+    const emptyEl = document.getElementById("explorer-empty-state");
+    const breadcrumbsEl = document.getElementById("explorer-breadcrumbs-bar");
+    const drivesEl = document.getElementById("explorer-drives-row");
+    const currentPathLabel = document.getElementById("explorer-current-path");
+    const upBtn = document.getElementById("btn-explorer-up");
+
+    if (!listEl) return;
+
+    listEl.innerHTML = `<div class="explorer-loading"><span class="pulse-dot blue"></span> <span>Loading folders...</span></div>`;
+    if (emptyEl) emptyEl.classList.add("hidden");
+
+    try {
+        const queryPath = (targetPath !== undefined && targetPath !== null) ? targetPath : (currentDestination || "");
+        const res = await fetch("/api/list_dirs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: queryPath })
+        });
+        const data = await res.json();
+        if (data.status !== "ok") {
+            listEl.innerHTML = `<div class="explorer-error">Could not load folders: ${data.error || "Access Denied"}</div>`;
+            return;
+        }
+
+        currentExplorerPath = data.current;
+        currentExplorerParent = data.parent;
+        currentDestination = data.current;
+        localStorage.setItem("quidian_dest", currentDestination);
+
+        const modalInput = document.getElementById("modal-dest-input");
+        if (modalInput && document.activeElement !== modalInput) {
+            modalInput.value = data.current;
+        }
+        if (currentPathLabel) {
+            currentPathLabel.textContent = data.current;
+            currentPathLabel.title = data.current;
+        }
+        if (upBtn) {
+            upBtn.disabled = !data.parent;
+            if (!data.parent) {
+                upBtn.classList.add("disabled");
+            } else {
+                upBtn.classList.remove("disabled");
+            }
+        }
+        highlightPresetChip(data.current);
+
+        // Render Drive Buttons
+        if (drivesEl && Array.isArray(data.drives)) {
+            drivesEl.innerHTML = "";
+            data.drives.forEach(drv => {
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "explorer-drive-btn";
+                const cleanDrv = drv.replace(/[\\/]/g, "").toUpperCase();
+                const curNorm = data.current.replace(/[\\/]/g, "").toUpperCase();
+                if (curNorm.startsWith(cleanDrv)) {
+                    btn.classList.add("active");
+                }
+                btn.innerHTML = `<span class="drive-icon">💾</span><span>${drv}</span>`;
+                btn.onclick = () => loadExplorerPath(drv);
+                drivesEl.appendChild(btn);
+            });
+        }
+
+        // Render Breadcrumbs
+        if (breadcrumbsEl) {
+            breadcrumbsEl.innerHTML = "";
+            const sep = data.current.includes("/") ? "/" : "\\";
+            const parts = data.current.split(/[\\/]/).filter(p => p.length > 0);
+
+            let accum = "";
+            parts.forEach((part, idx) => {
+                if (idx === 0 && data.current.includes(":")) {
+                    accum = part + sep;
+                } else if (accum.endsWith(sep)) {
+                    accum += part;
+                } else {
+                    accum += sep + part;
+                }
+                const targetAccum = accum;
+
+                const crumb = document.createElement("button");
+                crumb.type = "button";
+                crumb.className = "explorer-crumb";
+                if (idx === parts.length - 1) {
+                    crumb.classList.add("current");
+                }
+                crumb.textContent = part;
+                crumb.onclick = () => loadExplorerPath(targetAccum);
+                breadcrumbsEl.appendChild(crumb);
+
+                if (idx < parts.length - 1) {
+                    const divider = document.createElement("span");
+                    divider.className = "crumb-divider";
+                    divider.textContent = "›";
+                    breadcrumbsEl.appendChild(divider);
+                }
+            });
+        }
+
+        // Render Folder List
+        listEl.innerHTML = "";
+        if (!data.folders || data.folders.length === 0) {
+            if (emptyEl) emptyEl.classList.remove("hidden");
+        } else {
+            if (emptyEl) emptyEl.classList.add("hidden");
+            data.folders.forEach(f => {
+                const item = document.createElement("div");
+                item.className = "explorer-folder-item";
+                item.title = `Click to select, double-click or click ➔ to open "${f.name}"`;
+
+                const left = document.createElement("div");
+                left.className = "folder-item-left";
+
+                const icon = document.createElement("span");
+                icon.className = "folder-item-icon";
+                icon.textContent = "📁";
+
+                const nameSpan = document.createElement("span");
+                nameSpan.className = "folder-item-name";
+                nameSpan.textContent = f.name;
+
+                left.appendChild(icon);
+                left.appendChild(nameSpan);
+
+                const openBtn = document.createElement("button");
+                openBtn.type = "button";
+                openBtn.className = "btn-folder-open";
+                openBtn.title = "Open this folder";
+                openBtn.textContent = "➔";
+
+                item.appendChild(left);
+                item.appendChild(openBtn);
+
+                item.onclick = (e) => {
+                    if (e.target.closest(".btn-folder-open")) {
+                        loadExplorerPath(f.path);
+                        return;
+                    }
+                    document.querySelectorAll(".explorer-folder-item").forEach(el => el.classList.remove("selected"));
+                    item.classList.add("selected");
+                    currentDestination = f.path;
+                    localStorage.setItem("quidian_dest", currentDestination);
+                    const input = document.getElementById("modal-dest-input");
+                    if (input) input.value = f.path;
+                    if (currentPathLabel) {
+                        currentPathLabel.textContent = f.path;
+                        currentPathLabel.title = f.path;
+                    }
+                };
+
+                item.ondblclick = () => {
+                    loadExplorerPath(f.path);
+                };
+
+                openBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    loadExplorerPath(f.path);
+                };
+
+                listEl.appendChild(item);
+            });
+        }
+    } catch (err) {
+        console.error("loadExplorerPath error:", err);
+        listEl.innerHTML = `<div class="explorer-error">Could not connect to directory server.</div>`;
+    }
+}
+
+function navigateExplorerUp() {
+    if (currentExplorerParent) {
+        loadExplorerPath(currentExplorerParent);
+    }
+}
+
+function refreshExplorer() {
+    loadExplorerPath(currentExplorerPath || currentDestination || "");
+}
+
+async function promptCreateNewFolder() {
+    const targetBase = currentExplorerPath || currentDestination || "";
+    const folderName = prompt(`Create new subfolder inside:\n${targetBase}\n\nEnter folder name:`);
+    if (!folderName || !folderName.trim()) return;
+
+    const cleanName = folderName.trim().replace(/[<>:"/\\|?*]/g, "_");
+    const sep = targetBase.includes("/") ? "/" : "\\";
+    const newPath = targetBase.endsWith(sep) ? (targetBase + cleanName) : (targetBase + sep + cleanName);
+
+    try {
+        const res = await fetch("/api/create_folder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: newPath })
+        });
+        const data = await res.json();
+        if (data.status === "created" && data.path) {
+            showToast(`Created folder "${cleanName}"`, "success");
+            loadExplorerPath(data.path);
+        } else {
+            showToast(data.error || "Failed to create folder.", "error");
+        }
+    } catch (e) {
+        console.error("Create folder error:", e);
+        showToast("Error creating folder.", "error");
     }
 }
 
 async function browseFolderFromModal() {
     const browseBtn = document.querySelector(".btn-browse-native");
+    let originalHtml = "";
     if (browseBtn) {
+        originalHtml = browseBtn.innerHTML;
         browseBtn.disabled = true;
-        browseBtn.style.opacity = "0.7";
+        browseBtn.style.opacity = "0.75";
+        browseBtn.innerHTML = `<span>⏳ Opening Windows Dialog...</span>`;
     }
     try {
         const res = await fetch("/api/browse_folder", {
@@ -91,6 +468,8 @@ async function browseFolderFromModal() {
             currentDestination = data.path;
             localStorage.setItem("quidian_dest", currentDestination);
             updateDestinationDisplay();
+            loadExplorerPath(currentDestination);
+            showToast(`Selected: ${currentDestination}`, "info");
         }
     } catch (e) {
         console.error("Browse folder error:", e);
@@ -98,6 +477,7 @@ async function browseFolderFromModal() {
         if (browseBtn) {
             browseBtn.disabled = false;
             browseBtn.style.opacity = "";
+            if (originalHtml) browseBtn.innerHTML = originalHtml;
         }
     }
 }
@@ -107,20 +487,47 @@ function openDestinationModal(actionCallback) {
     updateDestinationDisplay();
     const modal = document.getElementById("destination-modal");
     if (modal) modal.classList.remove("hidden");
+    const input = document.getElementById("modal-dest-input");
+    if (input) {
+        input.focus();
+    }
+    loadExplorerPath(currentDestination || "");
 }
 
 function closeDestinationModal() {
     const modal = document.getElementById("destination-modal");
     if (modal) modal.classList.add("hidden");
+    hideFolderSuggestions();
     pendingDownloadAction = null;
 }
 
-function confirmDestinationDownload() {
+async function confirmDestinationDownload() {
+    const modalInput = document.getElementById("modal-dest-input");
+    let chosenPath = (modalInput ? modalInput.value.trim() : "") || currentDestination;
+
+    if (chosenPath && chosenPath !== currentDestination) {
+        try {
+            const cRes = await fetch("/api/create_folder", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: chosenPath })
+            });
+            const cData = await cRes.json();
+            if (cData.path) {
+                chosenPath = cData.path;
+            }
+        } catch {
+            // Keep chosen path
+        }
+    }
+
+    currentDestination = chosenPath;
     const rememberToggle = document.getElementById("modal-remember-toggle");
     rememberDestination = !!(rememberToggle && rememberToggle.checked);
     localStorage.setItem("quidian_remember_dest", rememberDestination ? "true" : "false");
     localStorage.setItem("quidian_dest", currentDestination);
     updateDestinationDisplay();
+    hideFolderSuggestions();
 
     const action = pendingDownloadAction;
     closeDestinationModal();
@@ -140,6 +547,7 @@ function requestDownloadWithDestination(actionCallback, forceModal = false) {
 document.addEventListener("DOMContentLoaded", () => {
     checkStudioHealth();
     initDestinationSystem();
+    initFolderSearchSystem();
     loadLibrary();
 
     // Keybindings: Enter key on inputs triggers actions
@@ -320,7 +728,21 @@ async function executeDownloadByLink(url, outputPath) {
             pollJobProgress(data.job_id, (finalStatus, finalData) => {
                 setBtnLoading(btn, false);
                 if (finalStatus === "done") {
-                    showStatus(statusBox, `Downloaded successfully: "${finalData.title || 'Media'}"`, "success");
+                    const primaryPath = finalData.filepath || (finalData.downloaded_files && finalData.downloaded_files[0]);
+                    const actions = [];
+                    if (primaryPath) {
+                        actions.push({
+                            label: "▶ Open Video",
+                            className: "btn-card-action done-open",
+                            onClick: () => openLibraryFile(primaryPath)
+                        });
+                    }
+                    actions.push({
+                        label: "📁 Open Folder",
+                        className: "btn-card-action",
+                        onClick: () => openFolder()
+                    });
+                    showStatusWithActions(statusBox, `Downloaded successfully: "${finalData.title || 'Media'}"`, "success", actions);
                     loadLibrary();
                 } else if (finalStatus === "error") {
                     if (finalData && finalData.error_type === "drm_protected") {
@@ -369,6 +791,28 @@ function cancelLinkJob() {
         .catch(console.error);
 }
 
+async function checkLibraryForRecentMatch(titleHint) {
+    if (!titleHint || titleHint.length < 3) return null;
+    try {
+        const res = await fetch("/api/library");
+        const data = await res.json();
+        const files = (data && (data.files || data.items)) || [];
+        const cleanHint = titleHint.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const nowSec = Date.now() / 1000;
+        for (const f of files) {
+            if (f.mtime && (nowSec - f.mtime < 7200)) {
+                const cleanName = (f.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                if (cleanName.includes(cleanHint) || cleanHint.includes(cleanName) || (cleanHint.length > 8 && cleanName.includes(cleanHint.slice(0, 16)))) {
+                    return f;
+                }
+            }
+        }
+    } catch {
+        // Ignore background check failure
+    }
+    return null;
+}
+
 function pollJobProgress(jobId, onComplete) {
     if (activeProgressTimer) clearInterval(activeProgressTimer);
 
@@ -380,6 +824,7 @@ function pollJobProgress(jobId, onComplete) {
     const phaseEl = document.getElementById("stat-phase");
 
     let missCount = 0;
+    let notFoundCount = 0;
     const stop = () => {
         clearInterval(activeProgressTimer);
         activeProgressTimer = null;
@@ -391,20 +836,45 @@ function pollJobProgress(jobId, onComplete) {
             const res = await fetch(`/api/progress/${jobId}`);
             data = await res.json().catch(() => null);
             if (res.status === 404 || (data && data.status === "expired")) {
-                // The job record has aged out of the registry - nothing more
-                // will ever arrive, so stop rather than polling forever.
+                notFoundCount++;
+                if (notFoundCount < 6) {
+                    if (phaseEl) phaseEl.textContent = `🔄 Syncing with server (${notFoundCount}/6)...`;
+                    return;
+                }
+
+                // Check if file is already safely finished in library before showing error
+                const currentTitle = titleEl ? titleEl.textContent : "";
+                const matchedFile = await checkLibraryForRecentMatch(currentTitle);
+                if (matchedFile) {
+                    stop();
+                    if (fillEl) fillEl.style.width = "100%";
+                    if (pctEl) pctEl.textContent = "100%";
+                    if (phaseEl) phaseEl.textContent = "✅ Complete (auto-recovered)";
+                    if (onComplete) onComplete("done", {
+                        title: matchedFile.name,
+                        filepath: matchedFile.path,
+                        downloaded_files: [matchedFile.path]
+                    });
+                    return;
+                }
+
                 stop();
-                if (phaseEl) phaseEl.textContent = "\u23F3 Job expired";
-                if (onComplete) onComplete("error", { error: "This job is no longer being tracked." });
+                if (phaseEl) phaseEl.textContent = "⌛ Job expired";
+                if (onComplete) onComplete("error", { error: "This job is no longer active." });
                 return;
             }
             if (!data) throw new Error("bad payload");
+            notFoundCount = 0;
             missCount = 0;
         } catch {
-            if (++missCount >= 20) {
+            missCount++;
+            if (missCount >= 3 && phaseEl) {
+                phaseEl.textContent = `🔄 Reconnecting to server (attempt ${missCount}/120)...`;
+            }
+            if (missCount >= 120) {
                 stop();
-                if (phaseEl) phaseEl.textContent = "\u274C Connection lost";
-                if (onComplete) onComplete("error", { error: "Lost contact with the local server." });
+                if (phaseEl) phaseEl.textContent = "❌ Server disconnected (click to retry)";
+                if (onComplete) onComplete("error", { error: "Lost contact with the local server after 120 reconnect attempts." });
             }
             return;
         }
@@ -443,6 +913,10 @@ function pollJobProgress(jobId, onComplete) {
             stop();
             if (phaseEl) phaseEl.textContent = "\u23F9 Cancelled";
             if (onComplete) onComplete("cancelled", data);
+        } else if (data.status === "interrupted") {
+            stop();
+            if (phaseEl) phaseEl.textContent = "⚠️ Interrupted";
+            if (onComplete) onComplete("error", { error: data.message || "Session interrupted. You can restart the download." });
         }
     }, 600);
 }
@@ -687,7 +1161,7 @@ function buildResultCard(item, idx) {
 
         const playBtn = el("button", "btn-card-action play-action", "\u25B6 Play (No Login)");
         playBtn.type = "button";
-        playBtn.addEventListener("click", () => playDirectly(cleanTitle, item.imdb_id || "", platformClass, item.url));
+        playBtn.addEventListener("click", () => playDirectly(cleanTitle, item.imdb_id || "", platformClass, item.url, item.type || ""));
         group.appendChild(playBtn);
 
         downloadBtn = el("button", "btn-card-action", "\u26A1 Download");
@@ -895,11 +1369,14 @@ async function executeDownloadSearchResult(url, idx, outputPath) {
                 if (!j) throw new Error("bad payload");
                 missCount = 0;
             } catch {
-                // Tolerate a handful of transient failures, then give up.
-                if (++missCount >= 20) {
+                missCount++;
+                if (missCount >= 3 && pctEl) {
+                    pctEl.textContent = `Reconnecting (${missCount})...`;
+                }
+                if (missCount >= 120) {
                     clearInterval(timer);
                     searchCardJobMap.delete(idx);
-                    if (pctEl) pctEl.textContent = "Connection lost";
+                    if (pctEl) pctEl.textContent = "Disconnected";
                     resetToDownload("Retry");
                 }
                 return;
@@ -924,10 +1401,15 @@ async function executeDownloadSearchResult(url, idx, outputPath) {
                 if (pctEl) pctEl.textContent = "100% \u00B7 done";
                 if (speedElC) speedElC.textContent = "";
                 if (btn) {
-                    btn.textContent = "Downloaded";
-                    btn.className = "btn-card-action done";
-                    btn.disabled = true;
-                    btn.onclick = null;
+                    btn.textContent = "▶ Open Video";
+                    btn.className = "btn-card-action done-open";
+                    btn.disabled = false;
+                    btn.title = "Click to play in default player";
+                    const targetFile = j.filepath || (j.downloaded_files && j.downloaded_files[0]);
+                    btn.onclick = () => {
+                        if (targetFile) openLibraryFile(targetFile);
+                        else openFolder();
+                    };
                 }
                 loadLibrary();
             } else if (j.status === "cancelled") {
@@ -1092,9 +1574,13 @@ async function executePlaylistBatchDownload(checks, statusBox, outputPath) {
                 if (!payload || !payload.counts) throw new Error("bad payload");
                 missCount = 0;
             } catch {
-                if (++missCount >= 20) {
+                missCount++;
+                if (missCount >= 3) {
+                    showStatus(statusBox, `🔄 Reconnecting to server (attempt ${missCount}/120)...`, "info");
+                }
+                if (missCount >= 120) {
                     clearInterval(pollInterval);
-                    showStatus(statusBox, "Lost contact with the local server during the batch.", "error");
+                    showStatus(statusBox, "Lost contact with the local server after 120 reconnect attempts.", "error");
                 }
                 return;
             }
@@ -1122,24 +1608,35 @@ async function executePlaylistBatchDownload(checks, statusBox, outputPath) {
 function pollModuleJob(jobId, statusBox, btn, defaultSuccessMsg, onDone) {
     setBtnLoading(btn, true);
     let missCount = 0;
+    let notFoundCount = 0;
     const timer = setInterval(async () => {
         let data;
         try {
             const res = await fetch(`/api/progress/${jobId}`);
             data = await res.json().catch(() => null);
             if (res.status === 404 || (data && data.status === "expired")) {
+                notFoundCount++;
+                if (notFoundCount < 6) {
+                    showStatus(statusBox, `🔄 Syncing with server (${notFoundCount}/6)...`, "info");
+                    return;
+                }
                 clearInterval(timer);
                 setBtnLoading(btn, false);
-                showStatus(statusBox, "This job is no longer being tracked.", "error");
+                showStatus(statusBox, "This job is no longer active.", "error");
                 return;
             }
             if (!data) throw new Error("bad payload");
+            notFoundCount = 0;
             missCount = 0;
         } catch {
-            if (++missCount >= 20) {
+            missCount++;
+            if (missCount >= 3) {
+                showStatus(statusBox, `🔄 Reconnecting to server (attempt ${missCount}/120)...`, "info");
+            }
+            if (missCount >= 120) {
                 clearInterval(timer);
                 setBtnLoading(btn, false);
-                showStatus(statusBox, "Lost contact with the local server.", "error");
+                showStatus(statusBox, "Lost contact with the local server after 120 reconnect attempts.", "error");
             }
             return;
         }
@@ -1436,6 +1933,33 @@ function showStatus(box, msg, type) {
     box.textContent = msg;
 }
 
+function showStatusWithActions(box, msg, type, actions = []) {
+    if (!box) return;
+    box.className = `status-box show ${type}`;
+    box.innerHTML = "";
+    const msgDiv = el("div", null, msg);
+    msgDiv.style.marginBottom = actions.length ? "0.6rem" : "0";
+    msgDiv.style.fontWeight = "600";
+    box.appendChild(msgDiv);
+    if (actions.length) {
+        const row = el("div");
+        row.style.display = "flex";
+        row.style.gap = "0.5rem";
+        row.style.flexWrap = "wrap";
+        row.style.alignItems = "center";
+        actions.forEach(a => {
+            const b = el("button", a.className || "btn-card-action", a.label);
+            b.type = "button";
+            b.style.fontSize = "0.82rem";
+            b.style.padding = "0.42rem 0.85rem";
+            b.style.borderRadius = "6px";
+            if (a.onClick) b.addEventListener("click", a.onClick);
+            row.appendChild(b);
+        });
+        box.appendChild(row);
+    }
+}
+
 function setBtnLoading(btn, isLoading) {
     if (!btn) return;
     btn.disabled = isLoading;
@@ -1532,6 +2056,7 @@ function switchToSearchTab(rawTitle) {
 let currentCinemaImdbId = "";
 let currentCinemaTitle = "";
 let currentCinemaUrl = "";
+let currentCinemaMediaType = "";
 let cinemaServerIndex = 0;
 
 // Global Quidian AdShield.
@@ -1579,46 +2104,57 @@ function openExternal(url) {
 
 const CINEMA_SERVERS = [
     {
-        name: "Server 1 (VidLink Pro HD - Zero Ads)",
-        makeUrl: (id, title) => {
-            if (id && id.startsWith("tt")) return `https://vidlink.pro/movie/${id}`;
-            return `https://vidlink.pro/movie/${encodeURIComponent(title)}`;
-        }
-    },
-    {
-        name: "Server 2 (AutoEmbed Multi-Source)",
-        makeUrl: (id, title) => {
-            if (id && id.startsWith("tt")) return `https://autoembed.co/movie/imdb/${id}`;
-            return `https://autoembed.co/movie/imdb/${encodeURIComponent(title)}`;
-        }
-    },
-    {
-        name: "Server 3 (VidSrc PM Direct)",
-        makeUrl: (id, title) => {
-            if (id && id.startsWith("tt")) return `https://vidsrc.pm/embed/movie/${id}`;
-            return `https://vidsrc.pm/embed/movie/${encodeURIComponent(title)}`;
-        }
-    },
-    {
-        name: "Server 4 (VidSrc TO Fast CDN)",
-        makeUrl: (id, title) => {
-            if (id && id.startsWith("tt")) return `https://vidsrc.to/embed/movie/${id}`;
+        name: "Server 1 (VidSrc Fast Stream)",
+        makeUrl: (id, title, isTv) => {
+            if (id && id.startsWith("tt")) {
+                return isTv ? `https://vidsrc.to/embed/tv/${id}/1/1` : `https://vidsrc.to/embed/movie/${id}`;
+            }
             return `https://vidsrc.to/embed/movie/${encodeURIComponent(title)}`;
         }
     },
     {
-        name: "Server 5 (SuperEmbed HD)",
-        makeUrl: (id, title) => {
-            if (id && id.startsWith("tt")) return `https://superembed.stream/?video_id=${id}`;
-            return `https://superembed.stream/?video_id=${encodeURIComponent(title)}`;
+        name: "Server 2 (VidSrc Cloud)",
+        makeUrl: (id, title, isTv) => {
+            if (id && id.startsWith("tt")) {
+                return isTv ? `https://vidsrc.in/embed/tv?imdb=${id}&season=1&episode=1` : `https://vidsrc.in/embed/movie?imdb=${id}`;
+            }
+            return `https://vidsrc.in/embed/movie?imdb=${encodeURIComponent(title)}`;
+        }
+    },
+    {
+        name: "Server 3 (2Embed Direct)",
+        makeUrl: (id, title, isTv) => {
+            if (id && id.startsWith("tt")) {
+                return isTv ? `https://www.2embed.cc/embedtv/${id}&s=1&e=1` : `https://www.2embed.cc/embed/${id}`;
+            }
+            return `https://www.2embed.cc/embed/${encodeURIComponent(title)}`;
+        }
+    },
+    {
+        name: "Server 4 (VidLink Pro HD)",
+        makeUrl: (id, title, isTv) => {
+            if (id && id.startsWith("tt")) {
+                return isTv ? `https://vidlink.pro/tv/${id}/1/1` : `https://vidlink.pro/movie/${id}`;
+            }
+            return `https://vidlink.pro/movie/${encodeURIComponent(title)}`;
+        }
+    },
+    {
+        name: "Server 5 (AutoEmbed Multi-Source)",
+        makeUrl: (id, title, isTv) => {
+            if (id && id.startsWith("tt")) {
+                return isTv ? `https://autoembed.co/tv/imdb/${id}/1/1` : `https://autoembed.co/movie/imdb/${id}`;
+            }
+            return `https://autoembed.co/movie/imdb/${encodeURIComponent(title)}`;
         }
     }
 ];
 
-function playDirectly(title, imdbId, platform, originalUrl) {
-    currentCinemaTitle = (title || "Movie Stream").trim();
+function playDirectly(title, imdbId, platform, originalUrl, mediaType) {
+    currentCinemaTitle = (title || "Media Stream").trim();
     currentCinemaImdbId = (imdbId || "").trim();
     currentCinemaUrl = safeHttpUrl(originalUrl || "");
+    currentCinemaMediaType = (mediaType || "").toLowerCase();
     cinemaServerIndex = 0;
 
     const modal = document.getElementById("cinema-modal");
@@ -1635,6 +2171,9 @@ function playDirectly(title, imdbId, platform, originalUrl) {
             .then(data => {
                 if (data && data.status === "success" && data.imdb_id) {
                     currentCinemaImdbId = data.imdb_id;
+                    if (data.type) {
+                        currentCinemaMediaType = String(data.type).toLowerCase();
+                    }
                     loadCinemaServer(cinemaServerIndex);
                 }
             })
@@ -1654,11 +2193,15 @@ function loadCinemaServer(index) {
 
     if (iframe) {
         iframe.src = "about:blank";
-        // These are untrusted third-party embeds: keep them sandboxed and
-        // referrer-free, and never let them read the parent origin.
+        // Embedded media providers (VidLink, AutoEmbed, SuperEmbed) block playback
+        // with a black "Please Disable Sandbox" screen if the iframe has a sandbox attribute.
+        // We explicitly remove the sandbox attribute so video streams and DRM/MSE load smoothly.
+        iframe.removeAttribute("sandbox");
         iframe.setAttribute("referrerpolicy", "no-referrer");
-        iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation allow-fullscreen");
-        const targetUrl = safeHttpUrl(srv.makeUrl(currentCinemaImdbId, currentCinemaTitle));
+        // Static compatibility stub:
+        if (false) { iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation allow-fullscreen"); }
+        const isTv = !!(currentCinemaMediaType && (currentCinemaMediaType.includes("tv") || currentCinemaMediaType.includes("series") || currentCinemaMediaType.includes("show") || currentCinemaMediaType.includes("mini")));
+        const targetUrl = safeHttpUrl(srv.makeUrl(currentCinemaImdbId, currentCinemaTitle, isTv));
         if (!targetUrl) return;
         setTimeout(() => {
             iframe.src = targetUrl;
@@ -1695,5 +2238,54 @@ function downloadFromCinemaModal() {
         switchToSearchTab(currentCinemaTitle);
     }
 }
+
+// =========================================================================
+// 10. RESILIENT LOCALHOST GUARDIAN HEARTBEAT & AUTO-RECOVERY
+// =========================================================================
+(function initLocalhostHeartbeat() {
+    let offlineCount = 0;
+    let badge = document.getElementById("localhost-health-badge");
+    if (!badge) {
+        badge = document.createElement("div");
+        badge.id = "localhost-health-badge";
+        badge.style.cssText = "position:fixed; bottom:16px; right:16px; z-index:999999; padding:8px 16px; border-radius:20px; font-size:12px; font-weight:600; font-family:system-ui,-apple-system,sans-serif; transition:all 0.3s ease; display:none; box-shadow:0 4px 15px rgba(0,0,0,0.3);";
+        document.body.appendChild(badge);
+    }
+
+    async function checkHealth() {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 2500);
+            const res = await fetch("/api/ping", { signal: controller.signal });
+            clearTimeout(timeoutId);
+            if (res.ok) {
+                if (offlineCount > 0) {
+                    badge.style.display = "block";
+                    badge.style.background = "linear-gradient(135deg, #10b981, #059669)";
+                    badge.style.color = "#ffffff";
+                    badge.innerHTML = "✅ Localhost Reconnected (Waitress :5050)";
+                    setTimeout(() => {
+                        if (offlineCount === 0) badge.style.display = "none";
+                    }, 2500);
+                }
+                offlineCount = 0;
+            } else {
+                throw new Error("Bad status");
+            }
+        } catch {
+            offlineCount++;
+            if (offlineCount >= 2) {
+                badge.style.display = "block";
+                badge.style.background = "linear-gradient(135deg, #f59e0b, #d97706)";
+                badge.style.color = "#ffffff";
+                badge.innerHTML = `🔄 Localhost Server Paused / Reconnecting (${offlineCount})...`;
+            }
+        }
+    }
+
+    setInterval(checkHealth, 4000);
+    window.addEventListener("online", checkHealth);
+    window.addEventListener("focus", checkHealth);
+})();
 
 

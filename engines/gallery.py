@@ -59,8 +59,15 @@ def download_social_gallery(url, output_path, progress_callback=None,
 
     os.makedirs(output_path, exist_ok=True)
 
-    cmd = [
-        sys.executable, "-m", "gallery_dl",
+    cmd_base = [sys.executable, "-m", "gallery_dl"]
+    try:
+        importlib.import_module("gallery_dl")
+    except Exception:
+        bin_path = shutil.which("gallery-dl")
+        if bin_path:
+            cmd_base = [bin_path]
+
+    cmd = cmd_base + [
         "--directory", output_path,
         "--no-mtime",
         url,
@@ -78,6 +85,7 @@ def download_social_gallery(url, output_path, progress_callback=None,
 
     downloaded_files = []
     seen = set()
+    raw_candidates = []
     out_lines, err_lines = [], []
 
     def handle_stdout_line(line):
@@ -86,6 +94,7 @@ def download_social_gallery(url, output_path, progress_callback=None,
             # '#' marks an already-present file that gallery-dl skipped.
             return
         candidate = line_str if os.path.isabs(line_str) else os.path.join(output_path, line_str)
+        raw_candidates.append(candidate)
         if candidate in seen or not os.path.exists(candidate):
             return
         seen.add(candidate)
@@ -124,6 +133,12 @@ def download_social_gallery(url, output_path, progress_callback=None,
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         _terminate(process)
+
+    # Re-check raw candidate paths for any files flushed with slight disk latency
+    for cand in raw_candidates:
+        if cand not in seen and os.path.isfile(cand):
+            seen.add(cand)
+            downloaded_files.append(cand)
 
     if cancelled:
         return {"count": len(downloaded_files), "files": downloaded_files,

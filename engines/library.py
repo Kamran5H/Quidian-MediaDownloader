@@ -142,7 +142,10 @@ def open_downloaded_file(filepath):
     norm = _assert_launchable(filepath)
 
     if sys.platform.startswith("win"):
-        os.startfile(norm)  # noqa: S606 - extension allow-list enforced above
+        try:
+            os.startfile(norm)  # noqa: S606 - extension allow-list enforced above
+        except OSError as e:
+            raise RuntimeError(f"No application is registered to open '{os.path.basename(norm)}' ({e}).")
     elif sys.platform == "darwin":
         subprocess.Popen(["open", norm])
     else:
@@ -152,7 +155,7 @@ def open_downloaded_file(filepath):
 
 def reveal_in_explorer(filepath):
     """
-    Highlight a file in the native file manager.
+    Highlight a file in the native file manager or open directory directly.
 
     The path is passed as an argv element, never interpolated into a shell
     string - a filename containing quotes or '&' would otherwise have been
@@ -163,7 +166,10 @@ def reveal_in_explorer(filepath):
     if sys.platform.startswith("win"):
         # explorer.exe returns a non-zero exit code even on success, so the
         # result is deliberately not checked.
-        subprocess.run(["explorer.exe", f"/select,{norm}"], timeout=15, check=False)
+        if os.path.isdir(norm):
+            subprocess.run(["explorer.exe", norm], timeout=15, check=False)
+        else:
+            subprocess.run(["explorer.exe", f"/select,{norm}"], timeout=15, check=False)
         return True
     if sys.platform == "darwin":
         subprocess.run(["open", "-R", norm], timeout=15, check=False)

@@ -14,6 +14,7 @@ import importlib
 import os
 import re
 import shutil
+import string
 import subprocess
 import sys
 import threading
@@ -25,6 +26,20 @@ from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Ensure safe stdout and stderr when executed via pythonw or without a console window
+if sys.stdout is None:
+    try:
+        log_file = os.path.join(base_dir, "server_stdout.log")
+        sys.stdout = open(log_file, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    try:
+        err_file = os.path.join(base_dir, "server_stderr.log")
+        sys.stderr = open(err_file, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 from engines import (
     download_media,
@@ -41,6 +56,7 @@ from engines import (
     search_media,
     search_videos,
     search_web,
+    JobStore,
 )
 
 # Re-exported for callers that import them from `app` (scripts, tests).
@@ -143,21 +159,30 @@ def _security_headers(resp):
     return resp
 
 
+def _is_local_or_lan_host(host):
+    if not host or host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+        return True
+    # Allow private LAN IPv4 (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    return bool(re.match(r'^(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$', host))
+
+
 @app.before_request
 def _guard_origin():
     """Block DNS-rebinding and drive-by cross-site calls into the local API.
 
-    The server binds to loopback, but a hostile page can still point its own
-    domain at 127.0.0.1. Requiring a loopback Host header closes that hole, and
-    rejecting foreign Origins stops drive-by POSTs from any browser tab.
+    Allows loopback and private LAN addresses, while rejecting foreign domains
+    and cross-origin requests from outside the host.
     """
     host = (request.host or "").split(":")[0].strip("[]").lower()
-    if host not in ("127.0.0.1", "localhost", "::1", ""):
+    if not _is_local_or_lan_host(host):
         return jsonify({"error": "Invalid Host header for local service."}), 403
     origin = request.headers.get("Origin")
     if origin:
         port = request.host.split(":")[-1] if ":" in request.host else "80"
-        allowed = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+        allowed = {
+            f"http://127.0.0.1:{port}", f"http://localhost:{port}",
+            f"http://{request.host}", f"https://{request.host}"
+        }
         if origin not in allowed:
             return jsonify({"error": "Cross-origin requests are not permitted."}), 403
     return None
@@ -170,25 +195,58 @@ _DIALOG_LOCK = threading.Lock()
 
 
 def _choose_folder_dialog(initial_dir=None):
-    """Launch the native directory dialog out-of-process so Flask keeps serving."""
+    """Launch the native directory dialog without freezing Flask."""
     init = initial_dir if (initial_dir and os.path.isdir(initial_dir)) else DOWNLOADS_DIR
-    code = (
-        "import tkinter as tk; from tkinter import filedialog; "
-        "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', 1); "
-        f"p = filedialog.askdirectory(initialdir={init!r}, title='Select Download Destination Folder'); "
-        "print(p if p else '')"
-    )
-    # Only ever one dialog at a time; a second would steal focus and confuse.
     if not _DIALOG_LOCK.acquire(blocking=False):
         return None
     try:
+        if os.name == "nt":
+            safe_init = init.replace("'", "''")
+            ps_script = (
+                "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
+                "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$d.Description = 'Select Download Destination Folder'; "
+                f"$d.SelectedPath = '{safe_init}'; "
+                "$d.ShowNewFolderButton = $true; "
+                "$top = New-Object System.Windows.Forms.Form; "
+                "$top.TopMost = $true; "
+                "$top.StartPosition = 'CenterScreen'; "
+                "$top.Size = New-Object System.Drawing.Size(1, 1); "
+                "$top.Opacity = 0; "
+                "$top.Show(); "
+                "$top.BringToFront(); "
+                "$top.Activate(); "
+                "$res = $d.ShowDialog($top); "
+                "$top.Close(); "
+                "if ($res -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
+            )
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=25,
+                )
+                folder = (proc.stdout or "").strip()
+                if folder and os.path.isdir(folder):
+                    return os.path.normpath(folder)
+            except Exception as ps_err:
+                app.logger.warning("PowerShell folder picker error: %s", ps_err)
+
+        # Fallback: Tkinter askdirectory
+        code = (
+            "import tkinter as tk; from tkinter import filedialog; "
+            "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', 1); "
+            f"p = filedialog.askdirectory(initialdir={init!r}, title='Select Download Destination Folder'); "
+            "print(p if p else '')"
+        )
         proc = subprocess.run(
             [sys.executable, "-c", code],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=300,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            timeout=25,
         )
         folder = (proc.stdout or "").strip()
         if folder and os.path.isdir(folder):
@@ -200,11 +258,110 @@ def _choose_folder_dialog(initial_dir=None):
     return None
 
 
+def _search_directories(query=None):
+    """
+    Fast live directory search across Windows drives, standard user folders, and subdirectories.
+    Returns a list of dicts: {"name": ..., "path": ..., "exists": bool, "can_create": bool}
+    """
+    home = os.path.expanduser("~")
+    base_places = [
+        os.path.join(home, "Downloads"),
+        os.path.join(home, "Desktop"),
+        os.path.join(home, "Videos"),
+        os.path.join(home, "Documents"),
+        os.path.join(home, "Music"),
+        DOWNLOADS_DIR,
+    ]
+    for d in string.ascii_uppercase:
+        drv = f"{d}:\\"
+        if os.path.exists(drv):
+            base_places.append(drv)
+
+    q = (query or "").strip().strip('"').strip("'")
+    results = []
+    seen = set()
+
+    def add_result(p, label=None, exists=True, can_create=False):
+        norm = os.path.normpath(p)
+        k = norm.lower()
+        if k not in seen:
+            seen.add(k)
+            name = label or os.path.basename(norm) or norm
+            results.append({"name": name, "path": norm, "exists": exists, "can_create": can_create})
+
+    if not q:
+        for p in base_places:
+            norm = os.path.normpath(p)
+            if os.path.isdir(norm):
+                add_result(norm)
+        return results
+
+    q_norm = os.path.expanduser(q)
+
+    # 1. Exact directory match: list its children
+    if os.path.isdir(q_norm):
+        add_result(q_norm, f"{os.path.basename(q_norm) or q_norm} (Current Folder)")
+        try:
+            with os.scandir(q_norm) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(('.', '$')):
+                        add_result(entry.path)
+                        if len(results) >= 20:
+                            break
+        except Exception:
+            pass
+        return results
+
+    # 2. Parent directory exists, match subdirectories by prefix
+    parent = os.path.dirname(q_norm)
+    child_prefix = os.path.basename(q_norm).lower()
+    if parent and os.path.isdir(parent):
+        try:
+            with os.scandir(parent) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(('.', '$')):
+                        if child_prefix in entry.name.lower():
+                            add_result(entry.path)
+                            if len(results) >= 20:
+                                break
+        except Exception:
+            pass
+        if results:
+            return results
+
+    # 3. Fuzzy search keyword in standard user places
+    needle = q.lower()
+    for root_dir in base_places:
+        if not os.path.isdir(root_dir):
+            continue
+        if needle in os.path.basename(root_dir).lower():
+            add_result(root_dir)
+        try:
+            with os.scandir(root_dir) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(('.', '$')):
+                        if needle in entry.name.lower():
+                            add_result(entry.path)
+                            if len(results) >= 20:
+                                break
+        except Exception:
+            pass
+
+    # 4. If path looks like a new folder path, offer creation
+    if len(q) >= 3 and (":\\" in q or ":/" in q or q.startswith("\\\\")):
+        parent_dir = os.path.dirname(q_norm)
+        if os.path.isdir(parent_dir):
+            add_result(q_norm, f"Create new folder: {os.path.basename(q_norm)}", exists=False, can_create=True)
+
+    return results
+
+
 # ---------------------------------------------------------------------------
-# In-memory job registry for non-blocking multi-engine execution
+# Persistent job registry backed by SQLite with in-memory caching
 # ---------------------------------------------------------------------------
-JOBS = {}
-JOBS_LOCK = threading.RLock()
+JOB_STORE = JobStore()
+JOBS = JOB_STORE._cache
+JOBS_LOCK = JOB_STORE._lock
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="quidian")
 
 
@@ -251,25 +408,7 @@ def _safe_local_path(path):
 
 def _prune_jobs():
     """Drop stale jobs so a long session cannot grow the registry without bound."""
-    now = time.time()
-    dead = []
-    for jid, j in list(JOBS.items()):
-        status = j.get("status")
-        if status in ("done", "error", "cancelled") and (now - j.get("finished", j.get("created", now)) > JOB_TTL_SECONDS):
-            dead.append(jid)
-        elif status == "queued" and (now - j.get("created", now) > 7200):
-            dead.append(jid)
-    for jid in dead:
-        JOBS.pop(jid, None)
-
-    # Hard ceiling: if a huge batch outruns the TTL, evict the oldest finished jobs.
-    if len(JOBS) > JOB_MAX_RECORDS:
-        finished = sorted(
-            (j for j in JOBS.values() if j.get("status") in ("done", "error", "cancelled")),
-            key=lambda j: j.get("finished", j.get("created", 0)),
-        )
-        for j in finished[: len(JOBS) - JOB_MAX_RECORDS]:
-            JOBS.pop(j["id"], None)
+    JOB_STORE.prune_stale_jobs(ttl_seconds=JOB_TTL_SECONDS, max_records=JOB_MAX_RECORDS)
 
 
 # Staging directories this app creates under the system temp dir. A crash or a
@@ -327,6 +466,13 @@ def _periodic_prune():
 threading.Thread(target=_periodic_prune, name="quidian-prune", daemon=True).start()
 
 try:
+    _recovered = JOB_STORE.recover_interrupted_jobs(DOWNLOADS_DIR)
+    if _recovered:
+        print(f"[Quidian] Auto-recovered {_recovered} completed/interrupted download(s) from previous session.")
+except Exception as e:
+    app.logger.warning("Job recovery note: %s", e)
+
+try:
     _reclaimed = sweep_orphan_staging()
     if _reclaimed:
         print(f"[Quidian] Reclaimed {_reclaimed} orphaned staging folder(s) from a previous run.")
@@ -336,51 +482,23 @@ except Exception:
 
 def _new_job(job_type="download"):
     job_id = uuid.uuid4().hex[:12]
-    with JOBS_LOCK:
-        _prune_jobs()
-        JOBS[job_id] = {
-            "id": job_id,
-            "type": job_type,
-            "status": "queued",
-            "percent": 0.0,
-            "speed": None,
-            "eta": None,
-            "title": None,
-            "filename": None,
-            "filepath": None,
-            "phase": None,
-            "message": "Queued...",
-            "error": None,
-            "cancel": False,
-            "created": time.time(),
-        }
+    _prune_jobs()
+    JOB_STORE.create_job(job_id, job_type=job_type)
     return job_id
 
 
 def _update_job(job_id, **kwargs):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            return
-        # A finished job must never be resurrected by a late hook from a
-        # worker thread that has not noticed the cancellation yet.
-        if job.get("status") in ("done", "error", "cancelled"):
-            return
-        job.update(kwargs)
+    JOB_STORE.update_job(job_id, force=False, **kwargs)
 
 
 def _is_cancelled(job_id):
-    with JOBS_LOCK:
-        j = JOBS.get(job_id)
-        return bool(j and j.get("cancel"))
+    j = JOB_STORE.get_job(job_id)
+    return bool(j and j.get("cancel"))
 
 
 def _force_job(job_id, **kwargs):
     """Terminal state write that bypasses the finished-job guard."""
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is not None:
-            job.update(kwargs)
+    JOB_STORE.update_job(job_id, force=True, **kwargs)
 
 
 def _finish_cancelled(job_id, message="Task cancelled."):
@@ -516,11 +634,21 @@ def _run_download_task(job_id, url, quality, use_turbo, output_path=None, use_st
         info = info if isinstance(info, dict) else {}
         title = info.get("title")
         downloads = info.get("requested_downloads") or []
-        fpath = downloads[0].get("filepath") if downloads else info.get("filepath")
+        fpaths = [d.get("filepath") for d in downloads if isinstance(d, dict) and d.get("filepath")]
+        if not fpaths and info.get("filepath"):
+            fpaths = [info.get("filepath")]
+        fpath = fpaths[0] if fpaths else None
         fname = os.path.basename(fpath) if fpath else None
         with JOBS_LOCK:
             prev_title = JOBS.get(job_id, {}).get("title")
         final_title = title or prev_title or (os.path.splitext(fname)[0] if fname else "Media")
+
+        if len(fpaths) > 1:
+            display_names = [os.path.basename(p) for p in fpaths[:3]]
+            msg = f"Saved {len(fpaths)} video(s): {', '.join(display_names)}{'...' if len(fpaths) > 3 else ''}"
+        else:
+            msg = f"Saved: {fname}" if fname else f"Saved to {target_dir}"
+
         _update_job(
             job_id,
             status="done",
@@ -528,8 +656,9 @@ def _run_download_task(job_id, url, quality, use_turbo, output_path=None, use_st
             title=final_title,
             filepath=fpath,
             filename=fname,
+            downloaded_files=fpaths,
             finished=time.time(),
-            message=f"Saved: {fname}" if fname else f"Saved to {target_dir}",
+            message=msg,
         )
     except Exception as e:
         if _was_cancelled(job_id, e):
@@ -685,6 +814,83 @@ def api_preset_paths():
     })
 
 
+def _list_directories(target_dir=None):
+    """
+    List subdirectories within target_dir, available drives, and parent path.
+    Enables instant in-browser folder exploration without relying on OS popups.
+    """
+    home = os.path.expanduser("~")
+    drives = []
+    if os.name == "nt":
+        for letter in string.ascii_uppercase:
+            drv = f"{letter}:\\"
+            if os.path.exists(drv):
+                drives.append(drv)
+    if not drives:
+        drives = [os.path.normpath(home)]
+
+    raw_target = _clean_str(target_dir) if target_dir else ""
+    if raw_target:
+        candidate = os.path.expanduser(raw_target)
+        if os.path.isdir(candidate):
+            cur = os.path.abspath(candidate)
+        elif os.path.isdir(os.path.dirname(candidate)):
+            cur = os.path.abspath(os.path.dirname(candidate))
+        else:
+            cur = DOWNLOADS_DIR if os.path.isdir(DOWNLOADS_DIR) else home
+    else:
+        cur = DOWNLOADS_DIR if os.path.isdir(DOWNLOADS_DIR) else home
+
+    cur = os.path.normpath(cur)
+    parent = os.path.dirname(cur)
+    if parent == cur:
+        parent = None
+
+    folders = []
+    try:
+        with os.scandir(cur) as it:
+            for entry in it:
+                try:
+                    name = entry.name
+                    if name.startswith((".", "$")):
+                        continue
+                    if name.lower() in ("system volume information", "recovery", "$recycle.bin"):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        folders.append({
+                            "name": name,
+                            "path": os.path.normpath(entry.path)
+                        })
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        app.logger.warning("Directory scan error for %s: %s", cur, e)
+
+    folders.sort(key=lambda x: x["name"].lower())
+
+    return {
+        "status": "ok",
+        "current": cur,
+        "parent": os.path.normpath(parent) if parent else None,
+        "drives": drives,
+        "folders": folders,
+        "can_create": True
+    }
+
+
+@app.route('/api/list_dirs', methods=['GET', 'POST'])
+def api_list_dirs():
+    """Directory navigation endpoint for in-modal visual folder picker."""
+    if request.method == 'POST':
+        data = _json_body()
+        path = data.get('path') or data.get('current')
+    else:
+        path = request.args.get('path') or request.args.get('current')
+
+    res = _list_directories(path)
+    return jsonify(res)
+
+
 @app.route('/api/browse_folder', methods=['POST'])
 def api_browse_folder():
     """Open the native directory selection dialog."""
@@ -694,6 +900,33 @@ def api_browse_folder():
     if folder:
         return jsonify({"status": "selected", "path": folder})
     return jsonify({"status": "cancelled", "path": initial})
+
+
+@app.route('/api/search_folders', methods=['GET', 'POST'])
+def api_search_folders():
+    """Live directory search & autocomplete endpoint."""
+    if request.method == 'POST':
+        data = _json_body()
+        query = data.get('query') or data.get('current')
+    else:
+        query = request.args.get('query') or request.args.get('q')
+
+    results = _search_directories(query)
+    return jsonify({"status": "ok", "query": query or "", "results": results})
+
+
+@app.route('/api/create_folder', methods=['POST'])
+def api_create_folder():
+    """Create a new folder directly if it doesn't exist."""
+    data = _json_body()
+    folder_path = _clean_str(data.get('path'))
+    if not folder_path:
+        return jsonify({"error": "No folder path provided."}), 400
+
+    target = _sanitize_output_path(folder_path, create=True)
+    if os.path.isdir(target):
+        return jsonify({"status": "created", "path": target})
+    return jsonify({"error": "Could not create specified folder."}), 500
 
 
 def _start_download(data, job_type):
@@ -784,6 +1017,7 @@ def api_resolve_imdb():
             "year": items[0].get("year"),
             "cast": items[0].get("cast"),
             "thumbnail": items[0].get("thumbnail"),
+            "type": items[0].get("type"),
         })
     return jsonify({"status": "not_found", "message": "No matching IMDb entry found"}), 404
 
@@ -878,6 +1112,11 @@ def api_audio_rip():
 
     if not source:
         return jsonify({"error": "Please provide a source URL or file path."}), 400
+    if not _is_http_url(source):
+        domain_pattern = r'^(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+(?:/.*)?$'
+        if re.match(domain_pattern, source):
+            source = f"https://{source}"
+
     if fmt not in VALID_AUDIO_FORMATS:
         return jsonify({"error": f"Unsupported audio format '{fmt}'. Choose one of: {', '.join(VALID_AUDIO_FORMATS)}."}), 400
     if bitrate not in VALID_BITRATES:
@@ -928,19 +1167,76 @@ def api_library():
 
 @app.route('/api/library/open', methods=['POST'])
 def api_library_open():
-    """Open a downloaded file in the OS default application."""
+    """Open a downloaded file in the OS default application, either by direct path or by name."""
     data = _json_body()
-    raw = data.get('path') or data.get('file_path') or DOWNLOADS_DIR
+    raw = data.get('path') or data.get('file_path') or data.get('name') or data.get('filename') or DOWNLOADS_DIR
     filepath = _safe_local_path(raw)
+
+    # If exact path didn't resolve directly, search by name in downloads folders
     if not filepath:
-        return jsonify({"error": "File not found."}), 404
+        search_term = str(raw or "").strip()
+        if search_term and search_term != DOWNLOADS_DIR:
+            target_dirs = [DOWNLOADS_DIR, os.path.join(base_dir, "Downloads")]
+            custom_dest = data.get('destination') or data.get('dir')
+            if custom_dest and os.path.isdir(custom_dest):
+                target_dirs.insert(0, custom_dest)
+
+            clean_term = re.sub(r'[\\/*?:"<>|]', "", search_term).lower().strip()
+            tokens = [t for t in re.split(r'[\s\-_]+', clean_term) if len(t) > 2]
+
+            best_match = None
+            best_score = -1
+            for search_root in target_dirs:
+                if not os.path.isdir(search_root):
+                    continue
+                def _safe_mtime(fname):
+                    try:
+                        return os.path.getmtime(os.path.join(root, fname))
+                    except (OSError, FileNotFoundError):
+                        return 0
+
+                try:
+                    for root, _, files in os.walk(search_root):
+                        for f in sorted(files, key=_safe_mtime, reverse=True):
+                            fl = f.lower()
+                            # Check substring match
+                            if clean_term and clean_term in fl:
+                                best_match = os.path.join(root, f)
+                                best_score = 100
+                                break
+                            # Token match
+                            if tokens:
+                                matched = sum(1 for t in tokens if t in fl)
+                                if matched > best_score and matched >= max(1, len(tokens) // 2):
+                                    best_score = matched
+                                    best_match = os.path.join(root, f)
+                        if best_score == 100:
+                            break
+                except Exception:
+                    pass
+                if best_match and best_score >= 100:
+                    break
+
+            if best_match:
+                filepath = _safe_local_path(best_match)
+
+    if not filepath:
+        return jsonify({"error": f"File '{raw}' not found."}), 404
     try:
         open_downloaded_file(filepath)
-        return jsonify({"status": "opened", "path": filepath})
+        return jsonify({"status": "opened", "path": filepath, "filename": os.path.basename(filepath)})
     except PermissionError as e:
         return jsonify({"error": str(e)}), 403
+    except OSError as e:
+        return jsonify({"error": f"Could not launch file: {e}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/open_by_name', methods=['POST'])
+def api_open_by_name():
+    """Universal endpoint to find and open downloaded video by search query / name."""
+    return api_library_open()
 
 
 @app.route('/api/library/reveal', methods=['POST'])
@@ -959,11 +1255,10 @@ def api_library_reveal():
 
 @app.route('/api/progress/<job_id>', methods=['GET'])
 def api_progress(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify({"error": "Unknown job id", "status": "expired"}), 404
-        return jsonify(dict(job))
+    job = JOB_STORE.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job id", "status": "expired"}), 404
+    return jsonify(dict(job))
 
 
 @app.route('/api/progress_bulk', methods=['POST'])
@@ -977,13 +1272,7 @@ def api_progress_bulk():
     ids = data.get('job_ids') or []
     if not isinstance(ids, list):
         return jsonify({"error": "'job_ids' must be a list."}), 400
-    out = {}
-    with JOBS_LOCK:
-        for jid in ids[:MAX_BATCH_URLS]:
-            if not isinstance(jid, str):
-                continue
-            job = JOBS.get(jid)
-            out[jid] = dict(job) if job else {"id": jid, "status": "expired"}
+    out = JOB_STORE.get_jobs_bulk(ids[:MAX_BATCH_URLS])
     counts = {}
     for j in out.values():
         key = j.get("status", "unknown")
@@ -993,18 +1282,16 @@ def api_progress_bulk():
 
 @app.route('/api/cancel/<job_id>', methods=['POST'])
 def api_cancel(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify({"error": "Unknown job id"}), 404
-        if job["status"] in ("done", "error", "cancelled"):
-            return jsonify({"status": job["status"], "message": "Job already finished."})
-        job["cancel"] = True
-        if job["status"] == "queued":
-            # Nothing has started yet, so retire it immediately.
-            job.update(status="cancelled", percent=0.0, finished=time.time(), message="Cancelled before start.")
-            return jsonify({"status": "cancelled"})
-        job["message"] = "Cancelling..."
+    job = JOB_STORE.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job id"}), 404
+    if job.get("status") in ("done", "error", "cancelled"):
+        return jsonify({"status": job.get("status"), "message": "Job already finished."})
+    JOB_STORE.update_job(job_id, cancel=True, message="Cancelling...")
+    if job.get("status") == "queued":
+        # Nothing has started yet, so retire it immediately.
+        JOB_STORE.update_job(job_id, force=True, status="cancelled", percent=0.0, finished=time.time(), message="Cancelled before start.")
+        return jsonify({"status": "cancelled"})
     return jsonify({"status": "cancelling"})
 
 
@@ -1046,6 +1333,28 @@ def api_health():
     })
 
 
+@app.route('/api/ping', methods=['GET'])
+def api_ping():
+    """Zero-overhead ping endpoint for localhost guardian watchdog."""
+    return jsonify({
+        "status": "ok",
+        "app": "quidian_media_downloader",
+        "port": _as_int(os.environ.get("QUIDIAN_PORT"), 5050, lo=1, hi=65535),
+        "timestamp": time.time()
+    })
+
+
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    """Universal status endpoint matching launch_quidian_media.vbs and monitors."""
+    return jsonify({
+        "status": "ok",
+        "app": "quidian_media_downloader",
+        "ready": True,
+        "timestamp": time.time()
+    })
+
+
 @atexit.register
 def _shutdown():
     _STOP_PRUNE.set()
@@ -1057,9 +1366,17 @@ def _shutdown():
 
 if __name__ == '__main__':
     port = _as_int(os.environ.get("QUIDIAN_PORT"), 5050, lo=1, hi=65535)
+    host = os.environ.get("QUIDIAN_HOST", "0.0.0.0")
     print("=" * 65)
-    print("  QUIDIAN - Media Downloader")
+    print("  QUIDIAN - Media Downloader (Production Engine)")
     print("  Developed by Kamran Ashraf")
-    print(f"  Running at http://127.0.0.1:{port}")
+    print(f"  Listening on http://127.0.0.1:{port} and http://localhost:{port}")
     print("=" * 65)
-    app.run(host='127.0.0.1', port=port, debug=False, threaded=True)
+    try:
+        from waitress import serve
+        threads = max(4, min(16, int(os.environ.get("QUIDIAN_SERVER_THREADS") or 8)))
+        print(f"  [Waitress] Starting robust production WSGI server with {threads} threads...")
+        serve(app, host=host, port=port, threads=threads, channel_timeout=120, cleanup_interval=30)
+    except ImportError:
+        print("  [Fallback] Waitress not installed, falling back to threaded Werkzeug...")
+        app.run(host=host, port=port, debug=False, threaded=True)

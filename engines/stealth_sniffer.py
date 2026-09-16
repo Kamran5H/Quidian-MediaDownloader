@@ -20,7 +20,7 @@ except ImportError:
 def _safe_cffi_get(url, headers=None, timeout=15, stream=False):
     if CURL_CFFI_AVAILABLE and cffi_requests:
         try:
-            return cffi_requests.get(url, impersonate="chrome124", headers=headers, timeout=timeout, stream=stream)
+            return cffi_requests.get(url, impersonate="chrome131", headers=headers, timeout=timeout, stream=stream)
         except Exception:
             pass
     import requests
@@ -44,6 +44,131 @@ def _remove_quietly(path):
             os.remove(path)
     except Exception:
         pass
+
+
+def _probe_stream_metadata(stream_url, headers=None, stream_type="hls"):
+    """
+    Examines stream URL, manifest, or headers to determine:
+    1. is_trailer: whether it contains trailer / teaser / preview markers.
+    2. duration_sec: total duration in seconds (sum of EXTINF for HLS, or from media headers).
+    3. size_bytes: content length in bytes if available.
+    4. score: ranking score (higher = authentic full-length feature, lower = preview/clip).
+    """
+    url_lower = stream_url.lower()
+    score = 0
+    duration_sec = 0.0
+    size_bytes = 0
+    is_trailer = False
+
+    # Check for obvious teaser/trailer/preview/ad markers in URL
+    trailer_regex = r'(?:trailer|teaser|preview|promo|sample|short[_-]|clip[_-]|ad[_-]|preroll|bumper|watermark|banner|intro[_-]|outro)'
+    if re.search(trailer_regex, url_lower):
+        is_trailer = True
+        score -= 600
+
+    probe_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    }
+    if headers and isinstance(headers, dict):
+        for k in ("referer", "origin", "cookie", "accept-language"):
+            for hk, hv in headers.items():
+                if hk.lower() == k:
+                    probe_headers[hk] = hv
+
+    if stream_type == "hls" or ".m3u8" in url_lower:
+        score += 50
+        try:
+            r = _safe_cffi_get(stream_url, headers=probe_headers, timeout=6)
+            if r.status_code == 200 and "#EXTM3U" in r.text:
+                m3u8_text = r.text
+                if "#EXT-X-STREAM-INF" in m3u8_text:
+                    sub_urls = [u for u in re.findall(r'(https?://[^\s\r\n]+|[^\s\r\n]+\.m3u8[^\s\r\n]*)', m3u8_text) if not u.startswith("#")]
+                    bw_matches = re.findall(r'BANDWIDTH=(\d+)', m3u8_text)
+                    if bw_matches:
+                        max_bw = max(int(b) for b in bw_matches)
+                        score += min(500, max_bw // 50000)
+                    if sub_urls:
+                        child = sub_urls[-1]
+                        if not child.startswith("http"):
+                            from urllib.parse import urljoin
+                            child = urljoin(stream_url, child)
+                        try:
+                            cr = _safe_cffi_get(child, headers=probe_headers, timeout=5)
+                            if cr.status_code == 200 and "#EXTM3U" in cr.text:
+                                m3u8_text = cr.text
+                        except Exception:
+                            pass
+
+                extinf_durations = re.findall(r'#EXTINF:([0-9.]+)', m3u8_text)
+                if extinf_durations:
+                    duration_sec = sum(float(d) for d in extinf_durations)
+                    if duration_sec < 90:
+                        is_trailer = True
+                        score -= 500
+                    elif duration_sec >= 600:
+                        score += 1000
+                    elif duration_sec >= 180:
+                        score += 500
+                    else:
+                        score += 100
+        except Exception:
+            pass
+
+    elif stream_type == "dash" or ".mpd" in url_lower:
+        score += 30
+        try:
+            r = _safe_cffi_get(stream_url, headers=probe_headers, timeout=6)
+            if r.status_code == 200:
+                m_dur = re.search(r'mediaPresentationDuration="PT(?:(\d+)H)?(?:(\d+)M)?(?:([0-9.]+)S)?"', r.text)
+                if m_dur:
+                    h = int(m_dur.group(1) or 0)
+                    m = int(m_dur.group(2) or 0)
+                    s = float(m_dur.group(3) or 0)
+                    duration_sec = h * 3600 + m * 60 + s
+                    if duration_sec < 90:
+                        is_trailer = True
+                        score -= 500
+                    elif duration_sec >= 600:
+                        score += 1000
+                    elif duration_sec >= 180:
+                        score += 500
+        except Exception:
+            pass
+
+    else:
+        # Direct video file
+        try:
+            head_headers = dict(probe_headers)
+            head_headers["Range"] = "bytes=0-10"
+            r = _safe_cffi_get(stream_url, headers=head_headers, timeout=6)
+            cl = r.headers.get("Content-Length") or r.headers.get("content-length")
+            cr = r.headers.get("Content-Range") or r.headers.get("content-range")
+            if cr and "/" in cr:
+                total_s = cr.split("/")[-1].strip()
+                if total_s.isdigit():
+                    size_bytes = int(total_s)
+            elif cl and cl.isdigit() and int(cl) > 1000:
+                size_bytes = int(cl)
+
+            if size_bytes > 50 * 1024 * 1024:
+                score += 400
+            elif size_bytes > 20 * 1024 * 1024:
+                score += 200
+            elif 0 < size_bytes < 5 * 1024 * 1024:
+                is_trailer = True
+                score -= 400
+        except Exception:
+            pass
+
+    return {
+        "url": stream_url,
+        "type": stream_type,
+        "headers": headers,
+        "is_trailer": is_trailer,
+        "duration": duration_sec,
+        "size_bytes": size_bytes,
+        "score": score,
+    }
 
 
 class StealthStreamInterceptor:
@@ -121,14 +246,23 @@ class StealthStreamInterceptor:
                 # Search directly for streams in response
                 m3u8_matches = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', resp.text)
                 mp4_matches = re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', resp.text)
-                if m3u8_matches:
-                    target_stream = m3u8_matches[0]
-                    self.log("Found direct HLS stream manifest!", 30)
-                    return self._download_stream_ffmpeg(target_stream, title="Stream_Capture", quality=quality)
-                elif mp4_matches:
-                    target_stream = mp4_matches[0]
-                    self.log("Found direct video file stream!", 30)
-                    return self._download_direct_file(target_stream, quality=quality)
+                all_matches = [("hls", u) for u in m3u8_matches] + [("mp4", u) for u in mp4_matches]
+                if all_matches:
+                    scored_matches = []
+                    for stype, u in all_matches:
+                        meta = _probe_stream_metadata(u, headers=headers, stream_type=stype)
+                        scored_matches.append(meta)
+                    # Filter out trailers if valid full stream candidate exists
+                    valid_matches = [m for m in scored_matches if not m["is_trailer"] or m["duration"] >= 180 or m["size_bytes"] > 20 * 1024 * 1024]
+                    if valid_matches:
+                        valid_matches.sort(key=lambda x: (x["score"], x["duration"]), reverse=True)
+                        best_match = valid_matches[0]
+                        if best_match["type"] == "hls":
+                            self.log("Found verified HLS stream manifest!", 30)
+                            return self._download_stream_ffmpeg(best_match["url"], title="Stream_Capture", quality=quality, headers=headers)
+                        else:
+                            self.log("Found verified direct video file stream!", 30)
+                            return self._download_direct_file(best_match["url"], title="Stream_Capture", quality=quality, headers=headers)
         except Exception as e:
             self.log(f"Fast probe encountered: {e}. Escalating to Stealth Browser Sniffer...", 20)
 
@@ -452,24 +586,45 @@ class StealthStreamInterceptor:
                 headless=True,
                 args=[
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-web-security",
                     "--allow-running-insecure-content",
+                    "--disable-infobars",
+                    "--ignore-certificate-errors",
+                    "--disable-site-isolation-trials",
                 ]
             )
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
                 device_scale_factor=1,
+                has_touch=False,
+                is_mobile=False,
+                locale="en-US",
+                timezone_id="America/New_York",
             )
 
             # Injected stealth evasions
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.chrome = { runtime: {} };
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: () => {},
+                    csi: () => {},
+                    app: {}
+                };
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+                const getParam = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(param) {
+                    if (param === 37445) return 'Intel Inc.';
+                    if (param === 37446) return 'Intel Iris OpenGL Engine';
+                    return getParam.apply(this, arguments);
+                };
             """)
 
             page = context.new_page()
@@ -481,11 +636,15 @@ class StealthStreamInterceptor:
                 if already_captured:
                     return
 
+                # Skip analytics, images, tracking pixels
+                if any(ign in r_url.lower() for ign in ("google-analytics", "doubleclick", "/favicon", ".png", ".jpg", ".svg", ".css")):
+                    return
+
                 if ".m3u8" in r_url or "application/vnd.apple.mpegurl" in ct or "application/x-mpegurl" in ct:
                     captured_streams.append({"type": "hls", "url": r_url, "headers": response.request.headers})
                 elif ".mpd" in r_url or "application/dash+xml" in ct:
                     captured_streams.append({"type": "dash", "url": r_url, "headers": response.request.headers})
-                elif (".mp4" in r_url or "video/mp4" in ct) and "google" not in r_url:
+                elif (".mp4" in r_url or ".webm" in r_url or ".mkv" in r_url or "video/" in ct) and "google" not in r_url:
                     captured_streams.append({"type": "mp4", "url": r_url, "headers": response.request.headers})
 
             page.on("response", handle_response)
@@ -500,20 +659,99 @@ class StealthStreamInterceptor:
                 except Exception:
                     pass
 
-                self.log("Analyzing playback and stream channels...", 50)
-                # Wait briefly for player initialization and network stream requests
-                time.sleep(5)
+                self.log("Penetrating page overlays and player frames...", 50)
+                self._abort_if_cancelled()
+                time.sleep(2)
+                self._abort_if_cancelled()
 
-                # Attempt to trigger video play if video element exists
+                # 1. Dismiss consent / confirmation / age-gate dialogs
                 try:
                     page.evaluate("""() => {
-                        const vids = document.querySelectorAll('video');
-                        vids.forEach(v => {
-                            v.muted = true;
-                            v.play().catch(() => {});
-                        });
+                        const dismissSelectors = [
+                            'button:has-text("Accept")', 'button:has-text("I Agree")',
+                            'button:has-text("Enter")', 'button:has-text("Continue")',
+                            'button:has-text("Close")', '.modal-close',
+                            '[class*="cookie" i] button', '[id*="cookie" i] button',
+                            '.agree-btn', 'a[class*="close" i]', 'button[class*="close" i]'
+                        ];
+                        for (const sel of dismissSelectors) {
+                            try {
+                                document.querySelectorAll(sel).forEach(el => el.click());
+                            } catch(e) {}
+                        }
                     }""")
-                    time.sleep(3)
+                except Exception:
+                    pass
+
+                # 2. Deep Frame Traversal: Play video & click play controls across all frames
+                self._abort_if_cancelled()
+                frames = page.frames
+                for fr in frames:
+                    try:
+                        fr.evaluate("""() => {
+                            // Click play buttons & overlays
+                            const playSelectors = [
+                                'button[aria-label*="play" i]', '.vjs-big-play-button',
+                                '.jw-display-icon-container', '.play-btn', '.btn-play',
+                                '[class*="play-btn" i]', '[class*="play_button" i]',
+                                '[class*="play-icon" i]', '[data-action="play"]',
+                                '.plyr__control--overlaid', 'div[class*="play" i]',
+                                'svg[class*="play" i]', '.video-js', 'video'
+                            ];
+                            for (const sel of playSelectors) {
+                                try {
+                                    document.querySelectorAll(sel).forEach(el => el.click());
+                                } catch(e) {}
+                            }
+                            // Programmatically play all video / audio tags
+                            document.querySelectorAll('video, audio').forEach(v => {
+                                try {
+                                    v.muted = true;
+                                    v.removeAttribute('autoplay');
+                                    const p = v.play();
+                                    if (p && p.catch) p.catch(() => {});
+                                } catch(e) {}
+                            });
+                        }""")
+                    except Exception:
+                        pass
+
+                # 3. Viewport scroll to trigger lazy-loaded players
+                try:
+                    page.evaluate("() => { window.scrollBy(0, 600); }")
+                    time.sleep(1)
+                    page.evaluate("() => { window.scrollTo(0, 0); }")
+                except Exception:
+                    pass
+
+                self._abort_if_cancelled()
+                time.sleep(3)
+                self._abort_if_cancelled()
+
+                # 4. Extract embedded stream configs from scripts and DOM
+                try:
+                    extracted = page.evaluate("""() => {
+                        const found = [];
+                        // Scan scripts for m3u8 and mp4 URLs
+                        document.querySelectorAll('script').forEach(s => {
+                            const txt = s.textContent || '';
+                            const m3u8s = txt.match(/https?:\\\\?\\/\\\\?\\/[^\\s"'<>]+?\\.m3u8[^\\s"'<>]*/g) || [];
+                            m3u8s.forEach(u => found.push(u.replace(/\\\\/g, '')));
+                            const mp4s = txt.match(/https?:\\\\?\\/\\\\?\\/[^\\s"'<>]+?\\.mp4[^\\s"'<>]*/g) || [];
+                            mp4s.forEach(u => found.push(u.replace(/\\\\/g, '')));
+                        });
+                        // Scan video and source tags
+                        document.querySelectorAll('video, source').forEach(el => {
+                            if (el.src) found.push(el.src);
+                            if (el.dataset && el.dataset.src) found.push(el.dataset.src);
+                        });
+                        return found;
+                    }""")
+                    if extracted:
+                        for u in extracted:
+                            if not any(s["url"] == u for s in captured_streams):
+                                stype = "hls" if ".m3u8" in u.lower() else "mp4"
+                                captured_streams.append({"type": stype, "url": u, "headers": {}})
                 except Exception:
                     pass
 
@@ -539,21 +777,72 @@ class StealthStreamInterceptor:
             )
 
         self.log(f"Intercepted {len(captured_streams)} stream candidate(s)!", 65)
+
         # Prefer adaptive manifests over whatever happened to load first - the
         # first response is very often an ad or a preview segment.
         priority = {"hls": 0, "dash": 1, "mp4": 2}
-        best = sorted(captured_streams, key=lambda s: priority.get(s["type"], 9))[0]
+
+        # Probe and score each stream candidate for duration, full-length vs trailer
+        scored_streams = []
+        for s in captured_streams:
+            meta = _probe_stream_metadata(s["url"], headers=s.get("headers"), stream_type=s.get("type", "hls"))
+            meta["original"] = s
+            p_val = priority.get(s.get("type"), 9)
+            meta["total_score"] = meta["score"] - (p_val * 10)
+            scored_streams.append(meta)
+
+        # Distinguish full-length videos from short preview clips / trailers
+        full_videos = [st for st in scored_streams if not st["is_trailer"] or st["duration"] >= 180]
+        pool = full_videos if full_videos else scored_streams
+
+        # Sort pool by score, duration, and priority
+        pool.sort(key=lambda x: (x["total_score"], x["duration"], -priority.get(x["type"], 9)), reverse=True)
+        best_meta = pool[0]
+        best = best_meta["original"]
         stream_url = best["url"]
         stream_type = best["type"]
+        stream_headers = best.get("headers")
 
         clean_title = re.sub(r'[\\/*?:"<>|]', "", page_title[0]).strip()
         if not clean_title or clean_title == "Captured_Media":
             clean_title = f"Media_Stream_{int(time.time())}"
 
+        # Download primary full-length stream
         if stream_type == "hls" or ".m3u8" in stream_url:
-            return self._download_stream_ffmpeg(stream_url, title=clean_title, quality=quality)
+            primary_res = self._download_stream_ffmpeg(stream_url, title=clean_title, quality=quality, headers=stream_headers)
         else:
-            return self._download_direct_file(stream_url, title=clean_title, quality=quality)
+            primary_res = self._download_direct_file(stream_url, title=clean_title, quality=quality, headers=stream_headers)
+
+        all_downloaded = [primary_res["filepath"]]
+
+        # Support multi-video pages: identify and download any other distinct full videos present on the page
+        distinct_candidates = []
+        for cand in pool[1:]:
+            cand_url = cand["url"]
+            cand_base = cand_url.split("?")[0].rsplit("/", 1)[0]
+            best_base = best_meta["url"].split("?")[0].rsplit("/", 1)[0]
+            if cand_base != best_base and cand["total_score"] > 0:
+                if not any(cand_url.split("?")[0].rsplit("/", 1)[0] == d["url"].split("?")[0].rsplit("/", 1)[0] for d in distinct_candidates):
+                    distinct_candidates.append(cand)
+
+        if distinct_candidates:
+            self.log(f"Detected {len(distinct_candidates)} additional distinct video(s) on page! Downloading all...", 85)
+            for idx, extra in enumerate(distinct_candidates):
+                extra_stream = extra["original"]
+                sub_title = f"{clean_title} - Video {idx + 2}"
+                try:
+                    if extra_stream["type"] == "hls" or ".m3u8" in extra_stream["url"]:
+                        sub_res = self._download_stream_ffmpeg(extra_stream["url"], title=sub_title, quality=quality, headers=extra_stream.get("headers"))
+                    else:
+                        sub_res = self._download_direct_file(extra_stream["url"], title=sub_title, quality=quality, headers=extra_stream.get("headers"))
+                    if sub_res and sub_res.get("filepath") and os.path.exists(sub_res["filepath"]):
+                        all_downloaded.append(sub_res["filepath"])
+                except Exception as extra_err:
+                    self.log(f"Additional video {idx + 2} notice: {extra_err}", 90)
+
+        primary_res["requested_downloads"] = [{"filepath": p} for p in all_downloaded]
+        primary_res["count"] = len(all_downloaded)
+        return primary_res
 
     def _run_ffmpeg(self, cmd, timeout, out_file):
         """Run FFmpeg, killing it on cancellation or timeout.
@@ -594,14 +883,23 @@ class StealthStreamInterceptor:
         except Exception:
             pass
 
-    def _download_stream_ffmpeg(self, stream_url, title="Downloaded_Stream", quality="4k"):
+    def _download_stream_ffmpeg(self, stream_url, title="Downloaded_Stream", quality="4k", headers=None):
         self._abort_if_cancelled()
         self.log("Capturing stream via high-speed FFmpeg reassembly...", 75)
         out_file = self._unique_path(os.path.join(self.output_path, f"{title}.mp4"))
 
+        header_lines = [
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ]
+        if headers and isinstance(headers, dict):
+            for hk, hv in headers.items():
+                if hk.lower() in ("referer", "origin", "cookie", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"):
+                    header_lines.append(f"{hk}: {hv}")
+        header_blob = "\r\n".join(header_lines) + "\r\n"
+
         common = [
             "ffmpeg", "-nostdin", "-y",
-            "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
+            "-headers", header_blob,
             "-fflags", "+genpts+discardcorrupt",
             "-avoid_negative_ts", "make_zero",
             "-i", stream_url,
@@ -676,7 +974,7 @@ class StealthStreamInterceptor:
             except Exception:
                 pass
 
-    def _download_direct_file(self, file_url, title="Downloaded_Media", quality="4k"):
+    def _download_direct_file(self, file_url, title="Downloaded_Media", quality="4k", headers=None):
         self._abort_if_cancelled()
         self.log("Downloading direct media stream file...", 80)
         quality = (quality or "4k").lower()
@@ -684,7 +982,7 @@ class StealthStreamInterceptor:
         # Detect source extension from URL path
         ext = "mp4"
         parsed_path = urlparse(file_url).path
-        for candidate_ext in [".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".flv", ".ts"]:
+        for candidate_ext in [".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".flv", ".ts", ".m4v", ".avi", ".mov", ".ogg", ".opus", ".wav", ".aac"]:
             if parsed_path.lower().endswith(candidate_ext):
                 ext = candidate_ext.lstrip(".")
                 break
@@ -693,10 +991,15 @@ class StealthStreamInterceptor:
         target_ext = "mp3" if quality == "audio" else ext
         out_file = self._unique_path(os.path.join(self.output_path, f"{safe_title}.{target_ext}"))
 
-        headers = {
+        req_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*"
         }
+        if headers and isinstance(headers, dict):
+            for k in ("referer", "origin", "cookie"):
+                for hk, hv in headers.items():
+                    if hk.lower() == k:
+                        req_headers[hk] = hv
 
         # If audio conversion is required, stream to a temp file first.
         if quality == "audio" and ext != "mp3":
@@ -704,7 +1007,7 @@ class StealthStreamInterceptor:
                 tempfile.gettempdir(), f"raw_{uuid.uuid4().hex[:10]}.{ext}"
             )
             try:
-                self._stream_to_file(file_url, headers, temp_stage)
+                self._stream_to_file(file_url, req_headers, temp_stage)
                 self.log("Transcoding media to studio MP3 320kbps...", 90)
                 rc, err = self._run_ffmpeg(
                     ["ffmpeg", "-nostdin", "-y", "-i", temp_stage, "-vn",
@@ -719,7 +1022,7 @@ class StealthStreamInterceptor:
             finally:
                 _remove_quietly(temp_stage)
         else:
-            self._stream_to_file(file_url, headers, out_file)
+            self._stream_to_file(file_url, req_headers, out_file)
 
         if not os.path.exists(out_file) or os.path.getsize(out_file) < 20 * 1024:
             _remove_quietly(out_file)

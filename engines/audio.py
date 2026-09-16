@@ -71,7 +71,9 @@ def _apply_audio_tags(filepath, target_format="mp3", title=None, artist=None, al
             try:
                 audio = EasyID3(filepath)
             except ID3NoHeaderError:
-                audio = EasyID3()
+                from mutagen.id3 import ID3
+                ID3().save(filepath)
+                audio = EasyID3(filepath)
             for k, v in tags.items():
                 audio[k] = v
             audio.save(filepath)
@@ -116,10 +118,16 @@ def rip_and_tag_audio(source, output_path, target_format="mp3", bitrate="320k",
     quality = _bitrate_kbps(bitrate)
     _check_cancel(cancel_check)
 
-    if str(source).lower().startswith(("http://", "https://")):
-        return _rip_from_url(source, output_path, target_format, container_ext,
+    src_str = str(source or "").strip().strip('"').strip("'")
+    if not src_str.lower().startswith(("http://", "https://")):
+        domain_pattern = r'^(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+(?:/.*)?$'
+        if re.match(domain_pattern, src_str):
+            src_str = f"https://{src_str}"
+
+    if src_str.lower().startswith(("http://", "https://")):
+        return _rip_from_url(src_str, output_path, target_format, container_ext,
                              quality, title, artist, album, cancel_check)
-    return _convert_local(source, output_path, target_format, container_ext,
+    return _convert_local(src_str, output_path, target_format, container_ext,
                           quality, title, artist, album, cancel_check)
 
 
@@ -149,7 +157,7 @@ def _rip_from_url(source, output_path, target_format, container_ext, quality,
         ]
 
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
         # Staging keeps half-written files out of the user's folder, so a
         # cancelled or failed rip leaves nothing behind.
         "paths": {"home": stage_dir, "temp": temp_dir},
@@ -162,6 +170,8 @@ def _rip_from_url(source, output_path, target_format, container_ext, quality,
         "socket_timeout": 30,
         "retries": 8,
         "fragment_retries": 8,
+        "extractor_retries": 3,
+        "concurrent_fragment_downloads": 8,
         "postprocessors": postprocessors,
         "writethumbnail": target_format != "wav",
         "progress_hooks": [hook],
@@ -192,7 +202,27 @@ def _rip_from_url(source, output_path, target_format, container_ext, quality,
         produced.sort(key=os.path.getsize, reverse=True)
         staged_file = produced[0]
         final_file = _unique_path(os.path.join(output_path, os.path.basename(staged_file)))
-        shutil.move(staged_file, final_file)
+        moved = False
+        for attempt in range(8):
+            try:
+                shutil.move(staged_file, final_file)
+                moved = True
+                break
+            except (PermissionError, OSError):
+                if attempt < 7:
+                    time.sleep(0.5)
+                else:
+                    try:
+                        shutil.copy2(staged_file, final_file)
+                        try:
+                            os.remove(staged_file)
+                        except Exception:
+                            pass
+                        moved = True
+                    except Exception:
+                        pass
+        if not moved and not os.path.exists(final_file):
+            raise RuntimeError(f"Could not save audio file to '{final_file}'. Check folder write permissions.")
 
         _apply_audio_tags(final_file, target_format, title=title, artist=artist, album=album)
 

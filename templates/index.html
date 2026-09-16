@@ -561,18 +561,63 @@
             <div class="modal-body">
                 <!-- Current Selected Path Box -->
                 <div class="input-wrapper">
-                    <label class="field-label">
-                        <span>Save Location</span>
-                        <span class="label-hint">Full filesystem directory</span>
+                    <label class="field-label" for="modal-dest-input">
+                        <span>Save Location / Search Folders</span>
+                        <span class="label-hint">Type, paste path, or browse Windows drives</span>
                     </label>
                     <div class="dest-path-box">
-                        <input type="text" id="modal-dest-input" class="glow-input mono-text" placeholder="C:\Users\..." readonly>
-                        <button class="btn-browse-native" onclick="browseFolderFromModal()">
+                        <div class="dest-input-container">
+                            <input type="text" id="modal-dest-input" class="glow-input mono-text" placeholder="Type folder path or name (e.g. C:\Downloads, D:\Movies)..." autocomplete="off" spellcheck="false">
+                            <div id="dest-suggestions" class="dest-suggestions-dropdown hidden"></div>
+                        </div>
+                        <button type="button" class="btn-browse-native" onclick="browseFolderFromModal()" title="Open native Windows folder picker">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
                             </svg>
                             <span>Browse Windows Folder...</span>
                         </button>
+                    </div>
+                    <div id="dest-path-feedback" class="dest-feedback-text" style="margin-top: 0.35rem; font-size: 0.78rem; color: var(--text-dim);"></div>
+                </div>
+
+                <!-- Visual In-Modal Folder Explorer -->
+                <div class="folder-explorer-section">
+                    <div class="explorer-header">
+                        <div class="explorer-header-left">
+                            <span class="explorer-badge">LOCAL EXPLORER</span>
+                            <span class="explorer-current-path mono-text" id="explorer-current-path" title="Current folder"></span>
+                        </div>
+                        <div class="explorer-header-actions">
+                            <button type="button" class="btn-explorer-tool" id="btn-explorer-up" onclick="navigateExplorerUp()" title="Go to parent directory">
+                                <span>⬆ Up</span>
+                            </button>
+                            <button type="button" class="btn-explorer-tool" onclick="promptCreateNewFolder()" title="Create new subfolder here">
+                                <span>➕ New Folder</span>
+                            </button>
+                            <button type="button" class="btn-explorer-tool icon-only" onclick="refreshExplorer()" title="Refresh folders">
+                                <span>🔄</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Drive Quick Jump Bar -->
+                    <div class="explorer-drives-row" id="explorer-drives-row">
+                        <!-- Filled dynamically: [💾 C:\] [💾 D:\] etc -->
+                    </div>
+
+                    <!-- Breadcrumbs Bar -->
+                    <div class="explorer-breadcrumbs-bar" id="explorer-breadcrumbs-bar">
+                        <!-- Filled dynamically: C:\ > Users > ... -->
+                    </div>
+
+                    <!-- Scrollable Folder Grid/List -->
+                    <div class="explorer-body">
+                        <div id="explorer-folder-list" class="explorer-folder-list">
+                            <!-- Populated dynamically with folders -->
+                        </div>
+                        <div id="explorer-empty-state" class="explorer-empty-state hidden">
+                            <span>📂 No subfolders here. Click "Confirm &amp; Start Download" to save into this folder, or click "➕ New Folder" above.</span>
+                        </div>
                     </div>
                 </div>
 
@@ -637,11 +682,12 @@
                 </div>
             </div>
             <div class="cinema-player-wrapper">
-                <iframe id="cinema-iframe" src="" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation" allowfullscreen="true" webkitallowfullscreen="true" mozallowfullscreen="true" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"></iframe>
+                <iframe id="cinema-iframe" src="" allowfullscreen="true" webkitallowfullscreen="true" mozallowfullscreen="true" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"></iframe>
+                <template id="sandboxed-preview-fallback"><iframe sandbox="allow-scripts allow-same-origin allow-presentation"></iframe></template>
             </div>
             <div class="cinema-modal-footer">
                 <div class="cinema-server-info">
-                    <span id="cinema-server-label" style="font-weight: 700; color: var(--aurora-2);">Server 1 (VidLink Pro HD)</span> &bull; 
+                    <span id="cinema-server-label" style="font-weight: 700; color: var(--aurora-2);">Server 1 (VidSrc Fast Stream)</span> &bull; 
                     <span style="color: var(--text-dim);">Clean Direct Stream &bull; Zero Click-Ads</span>
                 </div>
                 <button type="button" class="btn-cinema-download" id="cinema-download-btn" onclick="downloadFromCinemaModal()">

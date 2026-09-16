@@ -14,8 +14,11 @@ from .subtitles import extract_subtitles
 from .audio import rip_and_tag_audio
 from .library import list_downloads, open_downloaded_file, reveal_in_explorer
 from .stealth_sniffer import StealthStreamInterceptor
+from .series import SeriesDownloader
+from .job_store import JobStore
 
 __all__ = [
+    "JobStore",
     "download_media",
     "check_aria2c_installed",
     "verify_download_integrity",
@@ -32,4 +35,5 @@ __all__ = [
     "open_downloaded_file",
     "reveal_in_explorer",
     "StealthStreamInterceptor",
+    "SeriesDownloader",
 ]

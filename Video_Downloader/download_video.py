@@ -221,6 +221,28 @@ def download_video(url, output_path="Downloads", quality="4k", progress_hook=Non
                 downloads[0]["filepath"] = final_path
             else:
                 info["filepath"] = final_path
+                info["requested_downloads"] = [{"filepath": final_path}]
+
+        # Trailer / short preview check
+        if use_stealth and final_path and (url.startswith("http://") or url.startswith("https://")):
+            dur = (info.get("duration") or 0) if isinstance(info, dict) else 0
+            title_text = ((info.get("title") or "") + " " + os.path.basename(final_path)).lower()
+            is_trailer_marker = any(k in title_text for k in ("trailer", "teaser", "preview", "sample", "promo"))
+            is_short_preview = (dur > 0 and dur <= 65 and is_trailer_marker) or (is_trailer_marker and "youtube.com" not in url.lower())
+            if is_short_preview:
+                try:
+                    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    if _base not in sys.path:
+                        sys.path.append(_base)
+                    from engines.stealth_sniffer import StealthStreamInterceptor
+                    print("[*] Preview / trailer detected. Escalating to Stealth Stream Interceptor for full video...")
+                    interceptor = StealthStreamInterceptor(output_path=output_path)
+                    full_res = interceptor.bypass_and_extract(url, quality=quality)
+                    if full_res and full_res.get("filepath") and os.path.exists(full_res["filepath"]):
+                        return full_res
+                except Exception as s_err:
+                    if DownloadCancelled and isinstance(s_err, DownloadCancelled):
+                        raise
 
         print(f"\n[OK] Download completed! Saved in '{output_path}'.")
         return info
@@ -235,7 +257,10 @@ def download_video(url, output_path="Downloads", quality="4k", progress_hook=Non
         # Stealth Lock Bypass fallback
         if use_stealth and (url.startswith("http://") or url.startswith("https://")):
             err_str = msg.lower()
-            if any(k in err_str for k in ["403", "forbidden", "cloudflare", "bot", "protected", "drm", "login"]):
+            if any(k in err_str for k in [
+                "403", "forbidden", "cloudflare", "bot", "protected", "drm", "login",
+                "unsupported url", "unable to extract", "no video formats", "extractor", "blocked"
+            ]):
                 try:
                     _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     if _base not in sys.path:
@@ -560,15 +585,34 @@ def search_web(query, count=8, use_stealth=True):
     return cleaned[:int(count)]
 
 
+def download_series_batch(series_name, start_ep, end_ep, season_num=1, output_path="Downloads", quality="1080p"):
+    """Batch download a full series or Turkish drama season with synced subtitles."""
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _base not in sys.path:
+        sys.path.append(_base)
+    from engines.series import SeriesDownloader
+    downloader = SeriesDownloader(output_dir=output_path, quality=quality)
+    return downloader.download_range(series_name, start_ep, end_ep, season_num)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("              UNIVERSAL HD MEDIA DOWNLOADER              ")
     print("=" * 60)
     try:
-        url = input("\nPaste any video/audio link (or leave blank to search): ").strip()
+        url = input("\nPaste video link, search query, or series (e.g. 'Kurulus Osman 11-20'): ").strip()
         if url:
-            q = input("Quality [best/4k/1080p/720p/audio] (default 4k): ").strip() or "4k"
-            download_video(url, quality=q)
+            # Check for series range pattern like "Kurulus Osman 11-20" or "Series 1 to 10"
+            m = re.search(r'^(.*?)\s+(?:episodes?|bolum|season\s*\d+\s*episode)?\s*(\d+)\s*(?:-|to)\s*(\d+)$', url, re.I)
+            if m and not url.startswith("http"):
+                s_name = m.group(1).strip()
+                s_start = int(m.group(2))
+                s_end = int(m.group(3))
+                q = input("Quality [1080p/best/720p] (default 1080p): ").strip() or "1080p"
+                download_series_batch(s_name, s_start, s_end, quality=q)
+            else:
+                q = input("Quality [best/4k/1080p/720p/audio] (default 4k): ").strip() or "4k"
+                download_video(url, quality=q)
         else:
             term = input("Search by name: ").strip()
             if term:

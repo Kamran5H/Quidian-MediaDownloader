@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import subprocess
 import shutil
 
@@ -37,10 +38,10 @@ def download_subtitles_from_url(url, lang="en", output_path="Downloads"):
         'skip_download': True,           
         'writesubtitles': True,          
         'writeautomaticsub': True,       
-        'subtitleslangs': [f'{lang}.*', lang], 
+        'subtitleslangs': [lang], 
         'paths': {'home': output_path, 'temp': temp_dir},
         'outtmpl': {'default': '%(title)s.%(ext)s'},
-        'noplaylist': True,  # Prevent downloading entire playlists/mixes
+        'noplaylist': True,
         'no_warnings': True,
     }
 
@@ -48,12 +49,51 @@ def download_subtitles_from_url(url, lang="en", output_path="Downloads"):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         print(f"\n[✔] Subtitle download from URL completed! Saved in '{output_path}'.")
-    except yt_dlp.utils.DownloadError as e:
-        print(f"\n[✖] Download failed: {e}")
-        raise RuntimeError(f"Download failed: {e}")
     except Exception as e:
-        print(f"\n[✖] An unexpected error occurred: {e}")
-        raise RuntimeError(f"Unexpected error: {e}")
+        print(f"\n[*] Standard fetch encountered: {e}. Attempting community subtitle database lookup...")
+        try:
+            _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _base not in sys.path:
+                sys.path.append(_base)
+            from engines.series import SeriesDownloader
+            s_engine = SeriesDownloader(output_dir=output_path)
+            # Try to extract title
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                t = info.get('title', '')
+                m = re.search(r'(\d+)', t)
+                ep_num = int(m.group(1)) if m else 1
+                raw = s_engine.fetch_subtitles_from_cat(t, ep_num)
+                if raw:
+                    cleaned = s_engine.clean_subtitles(raw)
+                    clean_t = re.sub(r'[\\/*?:"<>|]', '', t).strip() or "Subtitles"
+                    out_file = os.path.join(output_path, f"{clean_t}.{lang}.srt")
+                    with open(out_file, 'w', encoding='utf-8-sig') as f:
+                        f.write(cleaned)
+                    print(f"\n[✔] Successfully fetched accurate subtitles from database! Saved: {out_file}")
+                    return
+        except Exception as fb_err:
+            pass
+        raise RuntimeError(f"Could not retrieve subtitles: {e}")
+
+def download_series_subtitles(series_name, start_ep, end_ep, season_num=1, output_path="Downloads"):
+    """Batch download cleaned, synchronized subtitles for a whole series."""
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _base not in sys.path:
+        sys.path.append(_base)
+    from engines.series import SeriesDownloader
+    downloader = SeriesDownloader(output_dir=output_path)
+    for ep in range(start_ep, end_ep + 1):
+        raw = downloader.fetch_subtitles_from_cat(series_name, ep, season_num)
+        if raw:
+            cleaned = downloader.clean_subtitles(raw)
+            safe_name = re.sub(r'[^\w\-]', '_', series_name)
+            out_file = os.path.join(output_path, f"{safe_name}_E{ep:02d}.en.srt")
+            with open(out_file, 'w', encoding='utf-8-sig') as f:
+                f.write(cleaned)
+            print(f"[✓] Saved subtitles: {os.path.basename(out_file)}")
+        else:
+            print(f"[!] Subtitles not found for Episode {ep}")
 
 def download_subtitles_from_file(filepath, lang="en"):
     """Finds and downloads the most accurate subtitles from subtitle databases for a local video file."""

@@ -31,7 +31,7 @@ def resolve_page_title(url):
     """Attempt fast metadata extraction from URL or page HTML via curl_cffi or urllib."""
     html_text = None
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
@@ -76,11 +76,14 @@ def resolve_page_title(url):
 
 
 QUALITY_FORMATS = {
-    "best":  "bestvideo*+bestaudio/best",
-    "4k":    "bestvideo[height<=2160]+bestaudio/best[height<=2160]/bestvideo*+bestaudio/best/best",
-    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best/best",
-    "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best/best",
-    "audio": "bestaudio/best",
+    # "best" always produces an MP4-compatible container with H.264 + AAC
+    # so the file plays on every device without re-encoding.
+    "best":  "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo*+bestaudio/best",
+    "4k":    "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]/bestvideo*+bestaudio/best",
+    "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best",
+    "720p":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
+    "480p":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best",
+    "audio": "bestaudio[ext=m4a]/bestaudio/best",
 }
 
 
@@ -191,13 +194,13 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "en-US,en;q=0.9",
     }
     if use_stealth:
         headers.update({
-            "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "Sec-Ch-Ua": '"Chromium";v="131", "Google Chrome";v="131", "Not-A.Brand";v="24"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
             "Sec-Fetch-Dest": "document",
@@ -508,12 +511,12 @@ def _score_movie_candidate(c, canonical_title, year=None, cast_names=None):
     # Cast verification
     if cast_names:
         for actor in cast_names:
-            for part in actor.split():
+            for part in str(actor).split():
                 if len(part) > 3 and re.search(r'\b' + re.escape(part.lower()) + r'\b', title_lower):
                     score += 20
         other_top_actors = ["shahrukh", "sharukh", "salman", "deepika", "ranbir", "ranveer", "akshay", "ajay devgn"]
         for ota in other_top_actors:
-            if ota in title_lower and not any(ota in a.lower() for a in cast_names):
+            if ota in title_lower and not any(ota in str(a).lower() for a in cast_names):
                 score -= 100
 
     # Healthy full movie duration window (1 hr 10 mins to 4 hrs)
@@ -549,7 +552,10 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
             media_type = items[0].get("type")
             raw_cast = items[0].get("cast") or ""
             if raw_cast:
-                cast_names = [c.strip() for c in raw_cast.split(",") if c.strip()]
+                if isinstance(raw_cast, list):
+                    cast_names = [str(c).strip() for c in raw_cast if str(c).strip()]
+                else:
+                    cast_names = [c.strip() for c in str(raw_cast).split(",") if c.strip()]
 
     # Check for Netflix search or title URL
     if not title and "netflix.com" in url_lower:
@@ -970,7 +976,8 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
         else:
             title = resolve_page_title(url) or ""
             suggested = title.strip()
-            raise RuntimeError(f"Unable to find an open full-length stream release for '{suggested}'. Try searching for the movie by title in the Search tab.")
+            display_target = f"'{suggested}'" if suggested else "this media"
+            raise RuntimeError(f"Unable to find an open full-length stream release for {display_target}. Try searching for the movie by title in the Search tab.")
 
 
     # Proactive high-speed routing for known protected platforms
