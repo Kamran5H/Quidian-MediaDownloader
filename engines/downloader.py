@@ -641,14 +641,24 @@ def resolve_streaming_media_to_downloadable(url, status_callback=None, use_steal
 
         scored.sort(key=lambda x: x[0], reverse=True)
         if scored:
-            chosen = scored[0][1]
-            if status_callback:
-                dur_mins = round((chosen.get("duration") or 0) / 60)
-                raw_title = chosen.get('title') or clean_name
-                safe_title = raw_title.encode('ascii', 'replace').decode('ascii')
-                platform = chosen.get("platform") or chosen.get("source") or "Web"
-                status_callback(f"Selected verified release: {safe_title} on {platform} ({dur_mins} mins)", 15)
-            return chosen.get("url")
+            for _, chosen in scored:
+                cand_url = chosen.get("url")
+                if not cand_url:
+                    continue
+                # Fast check to ensure platform candidate is reachable and not removed
+                if any(p in cand_url.lower() for p in ("dailymotion.com", "youtube.com", "youtu.be")):
+                    try:
+                        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True, 'simulate': True, 'no_warnings': True, 'socket_timeout': 5}) as ydl:
+                            ydl.extract_info(cand_url, download=False, process=False)
+                    except Exception:
+                        continue
+                if status_callback:
+                    dur_mins = round((chosen.get("duration") or 0) / 60)
+                    raw_title = chosen.get('title') or clean_name
+                    safe_title = raw_title.encode('ascii', 'replace').decode('ascii')
+                    platform = chosen.get("platform") or chosen.get("source") or "Web"
+                    status_callback(f"Selected verified release: {safe_title} on {platform} ({dur_mins} mins)", 15)
+                return cand_url
 
     return None
 
