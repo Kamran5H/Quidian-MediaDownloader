@@ -6,6 +6,10 @@ requests>=2.31.0
 curl_cffi>=0.7.0
 gallery-dl>=1.27.0
 mutagen>=1.47.0
+# HTML parsing for course/series page detection (engines/series.py).
+beautifulsoup4>=4.12.0
+# Production WSGI server; app.py falls back to Flask's dev server without it.
+waitress>=3.0.0
 
 # Open-web search. `ddgs` is the current package; `duckduckgo-search` is its
 # deprecated predecessor and is still importable as a fallback.
