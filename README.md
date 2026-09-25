@@ -74,16 +74,35 @@ Quidian-MediaDownloader/
 git clone https://github.com/Kamran5H/Quidian-MediaDownloader.git
 cd Quidian-MediaDownloader
 
-# Run automated Windows setup
+# Windows: automated setup
 setup_studio.bat
+
+# macOS / Linux
+python3 -m pip install -r requirements.txt
 ```
+
+[FFmpeg](https://ffmpeg.org/) is required for merging 4K video + audio and for MP3 conversion; [aria2](https://aria2.github.io/) is optional and enables 16-connection turbo mode.
 
 ### 2. Launch
 Double click [`run.bat`](run.bat) or execute:
 ```bash
 python app.py
 ```
-Open [http://localhost:5000](http://localhost:5000) to start downloading media at maximum speeds!
+Open [http://localhost:5050](http://localhost:5050) to start downloading media at maximum speeds!
+
+### 3. Configuration (optional)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `QUIDIAN_PORT` | `5050` | Port the dashboard listens on |
+| `QUIDIAN_HOST` | `127.0.0.1` | Set to `0.0.0.0` to use the dashboard from other devices on your network. Only do this on a network you trust: the dashboard has no login. |
+| `QUIDIAN_WORKERS` | `3` | Parallel download jobs (1–8) |
+
+### 4. Run the tests
+```bash
+python -m pip install pytest
+python -m pytest
+```
 
 ---
 

@@ -74,7 +74,7 @@ if %errorlevel% equ 0 (
 :: 5. Verification Test
 echo.
 echo [*] Performing engine self-test...
-python -c "import flask, yt_dlp, gallery_dl, mutagen, curl_cffi, app; print('[OK] All required engines compiled and operational!')"
+python -c "import flask, yt_dlp, gallery_dl, mutagen, curl_cffi, bs4, app; print('[OK] All required engines compiled and operational!')"
 if %errorlevel% neq 0 (
     echo [ERROR] Engine self-test failed. Please review error messages above.
     pause

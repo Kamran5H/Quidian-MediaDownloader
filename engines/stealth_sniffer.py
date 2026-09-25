@@ -465,7 +465,7 @@ class StealthStreamInterceptor:
             format_spec = "bestaudio/best"
             expected_ext = "mp3"
             postprocessors = [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"},
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
                 {"key": "FFmpegMetadata"},
             ]
         elif quality == "1080p":

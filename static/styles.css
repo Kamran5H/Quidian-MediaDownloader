@@ -308,6 +308,10 @@ body {
 .studio-main {
     flex: 1;
     padding: 1.8rem 2.2rem;
+    /* Explicit width: `margin: auto` in the stacked mobile layout otherwise
+       shrink-wraps the column to its content and pushes cards off-screen. */
+    width: 100%;
+    min-width: 0;
     max-width: 1100px;
     margin: 0 auto;
     display: flex;
@@ -686,7 +690,7 @@ body {
 /* Downloads Library Grid */
 .library-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
     gap: 1rem;
 }
 .library-card {
@@ -723,6 +727,18 @@ body {
     .studio-sidebar { width: 100%; height: auto; position: relative; border-right: none; border-bottom: 1px solid var(--border-glass); }
     .grid-2-col, .grid-3-col { grid-template-columns: 1fr; }
     .studio-main { padding: 1.5rem 1rem; }
+}
+
+/* Long folder paths must wrap instead of widening the page on small screens. */
+#library-module .module-header { gap: 0.8rem; }
+#library-module .module-header > div { min-width: 0; }
+#library-module .module-header > button { flex-shrink: 0; }
+#lib-path-label { overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+    /* Desktop card padding left barely 200px of content on a 320px phone. */
+    .glass-panel { padding: 1.4rem 1.1rem; }
+    .studio-topbar { padding: 0.8rem 0.9rem; }
 }
 
 
@@ -1327,7 +1343,7 @@ body {
 
 .explorer-folder-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
     gap: 0.45rem;
 }
 

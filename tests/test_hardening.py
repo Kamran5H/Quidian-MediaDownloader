@@ -243,7 +243,9 @@ class TestPathSafety(unittest.TestCase):
         evil_name = 'clip" & calc.exe & "x.mp4'
         with tempfile.TemporaryDirectory() as td:
             # The filename itself is illegal on Windows; assert on argv shape.
-            with patch("subprocess.run") as run:
+            # Exercise the Windows branch on every OS: that is where the
+            # shell-injection bug lived.
+            with patch("subprocess.run") as run, patch.object(librarymod.sys, "platform", "win32"):
                 path = os.path.join(td, "ok.mp4")
                 open(path, "wb").write(b"x")
                 librarymod.reveal_in_explorer(path)

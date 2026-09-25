@@ -75,14 +75,17 @@ def resolve_page_title(url):
     return None
 
 
+# Each preset only caps the height; *which* stream wins at that height is
+# decided by `format_sort` in build_engine_opts (highest resolution first, then
+# H.264 + AAC as the tie-breaker). The previous `[ext=mp4]` filters matched
+# first whenever any MP4 existed, so on YouTube - where 4K is only served as
+# VP9/WebM - "4K" and "8K" silently produced 1080p.
 QUALITY_FORMATS = {
-    # "best" always produces an MP4-compatible container with H.264 + AAC
-    # so the file plays on every device without re-encoding.
-    "best":  "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo*+bestaudio/best",
-    "4k":    "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]/bestvideo*+bestaudio/best",
-    "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best",
-    "720p":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
-    "480p":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best",
+    "best":  "bv*+ba/b",
+    "4k":    "bv*[height<=2160]+ba/b[height<=2160]/bv*+ba/b",
+    "1080p": "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b",
+    "720p":  "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b",
+    "480p":  "bv*[height<=480]+ba/b[height<=480]/bv*+ba/b",
     "audio": "bestaudio[ext=m4a]/bestaudio/best",
 }
 
@@ -259,7 +262,9 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
 
     if audio_only:
         opts["postprocessors"] = [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"},
+            # "320" is a true 320 kbps CBR encode, matching what the UI promises;
+            # "0" was LAME VBR V0 (~245 kbps average).
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
             {"key": "FFmpegMetadata"},
             {"key": "EmbedThumbnail"},
@@ -671,8 +676,12 @@ def is_playlist_url(url):
     if not url or not isinstance(url, str):
         return False
     u = url.lower().strip()
-    if "list=" in u:
-        if "list=wl" in u or "list=ll" in u:
+    list_id = re.search(r"[?&]list=([^&#]+)", u)
+    if list_id:
+        lid = list_id.group(1)
+        # Watch Later / Liked need a login, and "RD..." Mixes are endless
+        # auto-generated radio queues: a video opened from one means "this video".
+        if lid in ("wl", "ll") or (lid.startswith("rd") and "watch" in u):
             return False
         return True
     if any(m in u for m in ("/playlist", "/sets/", "/album/", "/channel/", "/c/")):
@@ -779,8 +788,10 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
                 if progress_hook:
                     try:
                         progress_hook({
-                            "status": "finished",
-                            "downloaded_bytes": int((idx / total) * 100000000),
+                            # "downloading", not "finished": the latter means
+                            # the whole job is done and jumps the bar to 95%.
+                            "status": "downloading",
+                            "downloaded_bytes": int(min(0.99, idx / total) * 100000000),
                             "total_bytes": 100000000,
                             "total_bytes_estimate": 100000000,
                             "info_dict": {"title": f"[{idx}/{total}] {item_title}"},
@@ -818,7 +829,17 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
                     d_copy = dict(d)
                     info_copy = dict(d.get("info_dict") or {})
                     info_copy["title"] = f"[{current_idx}/{total}] {item_t}"
+                    # Codec fields make the caller split progress into
+                    # video (0-80%) and audio (80-95%) phases, which is right
+                    # for one file but made the bar jump to 80%+ on the very
+                    # first item of a playlist. Report plain overall progress.
+                    info_copy.pop("vcodec", None)
+                    info_copy.pop("acodec", None)
                     d_copy["info_dict"] = info_copy
+                    # A per-stream "finished" is not the playlist finishing;
+                    # forwarding it pinned the bar at 95% after one stream.
+                    if d_copy.get("status") == "finished":
+                        d_copy["status"] = "downloading"
 
                     total_b = d.get("total_bytes") or d.get("total_bytes_estimate")
                     down_b = d.get("downloaded_bytes") or 0
