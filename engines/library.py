@@ -4,6 +4,7 @@ Developed by Kamran Ashraf
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -149,8 +150,24 @@ def open_downloaded_file(filepath):
     elif sys.platform == "darwin":
         subprocess.Popen(["open", norm])
     else:
-        subprocess.Popen(["xdg-open", norm])
+        _xdg_open(norm)
     return True
+
+
+def _xdg_open(target):
+    """Open `target` on Linux/BSD desktops, with an actionable error when no
+    opener is installed (headless boxes, minimal WSL) instead of a bare
+    FileNotFoundError about 'xdg-open'."""
+    for opener in ("xdg-open", "gio", "kde-open5", "kde-open"):
+        exe = shutil.which(opener)
+        if exe:
+            argv = [exe, "open", target] if opener == "gio" else [exe, target]
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+    raise RuntimeError(
+        "No desktop file opener was found (install 'xdg-utils'). "
+        f"The file is at: {target}"
+    )
 
 
 def reveal_in_explorer(filepath):
@@ -175,5 +192,5 @@ def reveal_in_explorer(filepath):
         subprocess.run(["open", "-R", norm], timeout=15, check=False)
         return True
     parent = norm if os.path.isdir(norm) else os.path.dirname(norm)
-    subprocess.Popen(["xdg-open", parent])
+    _xdg_open(parent)
     return True

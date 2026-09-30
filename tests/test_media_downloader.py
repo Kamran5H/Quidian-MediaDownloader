@@ -244,10 +244,18 @@ Language: en
         res_imdb_no_title = self.client.get("/api/resolve_imdb")
         self.assertEqual(res_imdb_no_title.status_code, 400)
 
-        # /api/resolve_imdb with valid movie title -> 200 and json with imdb_id
-        res_imdb = self.client.get("/api/resolve_imdb?title=The+Matrix")
+        # /api/resolve_imdb with valid movie title -> 200 and json with imdb_id.
+        # The IMDb lookup itself is mocked so the suite runs offline and in CI.
+        fake = [{"imdb_id": "tt0133093", "title": "The Matrix", "year": 1999,
+                 "cast": "Keanu Reeves", "thumbnail": None, "type": "movie"}]
+        with patch("engines.search.search_imdb", return_value=fake):
+            res_imdb = self.client.get("/api/resolve_imdb?title=The+Matrix")
         self.assertEqual(res_imdb.status_code, 200)
-        self.assertIn("imdb_id", res_imdb.json)
+        self.assertEqual(res_imdb.json["imdb_id"], "tt0133093")
+
+        with patch("engines.search.search_imdb", return_value=[]):
+            res_missing = self.client.get("/api/resolve_imdb?title=zzzz")
+        self.assertEqual(res_missing.status_code, 404)
 
 
 if __name__ == '__main__':

@@ -23,7 +23,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, jsonify, render_template, request, Response
+from flask import Flask, jsonify, render_template, request, Response, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -318,6 +318,16 @@ def _search_directories(query=None):
             pass
         return results
 
+    # A full path (C:\..., \\server\..., /home/..., ~/...) whose parent exists
+    # but which does not exist itself can be offered as a new folder.
+    looks_like_path = len(q) >= 3 and (
+        os.path.isabs(q_norm) or ":\\" in q or ":/" in q or q.startswith("\\\\")
+    )
+
+    def offer_create():
+        if looks_like_path and os.path.isdir(os.path.dirname(q_norm)) and not os.path.exists(q_norm):
+            add_result(q_norm, f"Create new folder: {os.path.basename(q_norm)}", exists=False, can_create=True)
+
     # 2. Parent directory exists, match subdirectories by prefix
     parent = os.path.dirname(q_norm)
     child_prefix = os.path.basename(q_norm).lower()
@@ -333,6 +343,9 @@ def _search_directories(query=None):
         except Exception:
             pass
         if results:
+            # Typing "Vid" next to an existing "Videos" must still allow
+            # creating "Vid" itself.
+            offer_create()
             return results
 
     # 3. Fuzzy search keyword in standard user places
@@ -354,11 +367,7 @@ def _search_directories(query=None):
             pass
 
     # 4. If path looks like a new folder path, offer creation
-    if len(q) >= 3 and (":\\" in q or ":/" in q or q.startswith("\\\\")):
-        parent_dir = os.path.dirname(q_norm)
-        if os.path.isdir(parent_dir):
-            add_result(q_norm, f"Create new folder: {os.path.basename(q_norm)}", exists=False, can_create=True)
-
+    offer_create()
     return results
 
 
@@ -387,7 +396,9 @@ def _sanitize_output_path(path, create=True):
     if not clean or "\x00" in clean:
         return DOWNLOADS_DIR
     try:
-        norm = os.path.normpath(os.path.abspath(clean))
+        # Expand "~" so "~/Videos" means the home folder, not a literal "~"
+        # directory created under the server's working directory.
+        norm = os.path.normpath(os.path.abspath(os.path.expanduser(clean)))
         if os.path.isdir(norm):
             return norm
         if not create:
@@ -406,7 +417,7 @@ def _safe_local_path(path):
     if not clean or "\x00" in clean:
         return None
     try:
-        norm = os.path.realpath(os.path.normpath(os.path.abspath(clean)))
+        norm = os.path.realpath(os.path.normpath(os.path.abspath(os.path.expanduser(clean))))
     except Exception:
         return None
     return norm if os.path.exists(norm) else None
@@ -855,6 +866,18 @@ def _run_subtitles_task(job_id, url, lang, output_path=None):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(base_dir, "assets"), "icon.ico",
+                               mimetype="image/vnd.microsoft.icon", max_age=86400)
+
+
+@app.route('/assets/icon.png')
+def app_icon_png():
+    return send_from_directory(os.path.join(base_dir, "assets"), "icon.png",
+                               mimetype="image/png", max_age=86400)
 
 
 @app.route('/api/preset_paths', methods=['GET'])
@@ -1313,7 +1336,7 @@ def api_library_open():
         return jsonify({"status": "opened", "path": filepath, "filename": os.path.basename(filepath)})
     except PermissionError as e:
         return jsonify({"error": str(e)}), 403
-    except OSError as e:
+    except (OSError, RuntimeError) as e:
         return jsonify({"error": f"Could not launch file: {e}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1335,6 +1358,10 @@ def api_library_reveal():
     try:
         reveal_in_explorer(filepath)
         return jsonify({"status": "revealed", "path": filepath})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except (OSError, RuntimeError) as e:
+        return jsonify({"error": f"Could not open the file manager: {e}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1391,6 +1418,8 @@ def api_open_folder():
     try:
         open_downloaded_file(folder)
         return jsonify({"status": "opened", "path": folder})
+    except (OSError, RuntimeError) as e:
+        return jsonify({"error": f"Could not open the file manager: {e}", "path": folder}), 400
     except Exception as e:
         return jsonify({"error": str(e), "path": folder}), 500
 
@@ -1673,11 +1702,16 @@ def _shutdown():
 
 if __name__ == '__main__':
     port = _as_int(os.environ.get("QUIDIAN_PORT"), 5050, lo=1, hi=65535)
-    host = os.environ.get("QUIDIAN_HOST", "0.0.0.0")
+    # Loopback only by default: the API can write anywhere on disk and launch
+    # local files, so exposing it to every device on the Wi-Fi must be an
+    # explicit choice (QUIDIAN_HOST=0.0.0.0).
+    host = os.environ.get("QUIDIAN_HOST", "127.0.0.1")
     print("=" * 65)
     print("  QUIDIAN - Media Downloader (Production Engine)")
     print("  Developed by Kamran Ashraf")
     print(f"  Listening on http://127.0.0.1:{port} and http://localhost:{port}")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  WARNING: also reachable from your network via host {host}")
     print("=" * 65)
     try:
         from waitress import serve
