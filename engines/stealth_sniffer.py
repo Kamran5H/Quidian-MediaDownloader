@@ -46,6 +46,29 @@ def _remove_quietly(path):
         pass
 
 
+AD_AND_TRACKER_DOMAINS = re.compile(
+    r'(?:^|[./])(?:'
+    r'doubleclick\.net|google-analytics\.com|googlesyndication\.com|googletagservices\.com|'
+    r'adservice\.google\.[a-z.]+|popads\.net|popcash\.net|propellerads\.com|'
+    r'exoclick\.com|adsterra\.com|trafficfactory\.biz|juicyads\.com|'
+    r'mgid\.com|taboola\.com|outbrain\.com|zergnet\.com|revcontent\.com|'
+    r'bet365\.com|1xbet\.com|parimatch|mostbet|melbet|'
+    r'cpmstar\.com|adnxs\.com|rubiconproject\.com|pubmatic\.com|openx\.net|'
+    r'amazon-adsystem\.com|criteo\.com|scorecardresearch\.com|hotjar\.com|'
+    r'crazyegg\.com|mouseflow\.com|adroll\.com|bidswitch\.net|smartadserver\.com|'
+    r'moatads\.com|quantserve\.com|optimizely\.com|yandex\.ru/metrika|'
+    r'trafficjunky\.com|tsyndicate\.com|plugrush\.com|clickadu\.com|hilltopads\.net|'
+    r'yllix\.com|monetag\.com|ad-maven\.com|richpush\.co|pushwoosh\.com|clickfunnels\.com'
+    r')(?::\d+)?(?:/|$)',
+    re.IGNORECASE
+)
+
+AD_PATH_KEYWORDS = re.compile(
+    r'/(?:ads?|advert(?:isement)?|banners?|popunder|pop-up|trackers?|telemetry|analytics|beacon|pixel|affiliate|vast|vpaid|ima3?|preroll|midroll)/',
+    re.IGNORECASE
+)
+
+
 def _probe_stream_metadata(stream_url, headers=None, stream_type="hls"):
     """
     Examines stream URL, manifest, or headers to determine:
@@ -61,10 +84,10 @@ def _probe_stream_metadata(stream_url, headers=None, stream_type="hls"):
     is_trailer = False
 
     # Check for obvious teaser/trailer/preview/ad markers in URL
-    trailer_regex = r'(?:trailer|teaser|preview|promo|sample|short[_-]|clip[_-]|ad[_-]|preroll|bumper|watermark|banner|intro[_-]|outro)'
+    trailer_regex = r'(?:trailer|teaser|preview|promo|sample|short[_-]|clip[_-]|ad[_-]|preroll|midroll|bumper|watermark|banner|intro[_-]|outro|vast|vpaid|googleads)'
     if re.search(trailer_regex, url_lower):
         is_trailer = True
-        score -= 600
+        score -= 750
 
     probe_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -209,7 +232,7 @@ class StealthStreamInterceptor:
             counter += 1
         return f"{base} ({counter}){ext}"
 
-    def bypass_and_extract(self, url, quality="4k", cookies_file=None):
+    def bypass_and_extract(self, url, quality="4k", cookies_file=None, cookies_from_browser=None):
         """
         Main entrypoint: Attempt bypass and stream sniffing.
         Returns a dict with media information and final filepath.
@@ -270,7 +293,7 @@ class StealthStreamInterceptor:
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("Playwright is required for deep stream interception but is not installed.")
 
-        return self._sniff_with_playwright(url, quality=quality)
+        return self._sniff_with_playwright(url, quality=quality, cookies_from_browser=cookies_from_browser)
 
     def _resolve_course_media(self, url, quality="4k"):
         """
@@ -575,13 +598,13 @@ class StealthStreamInterceptor:
             "requested_downloads": [{"filepath": final_file}]
         }
 
-    def _sniff_with_playwright(self, url, quality="4k"):
+    def _sniff_with_playwright(self, url, quality="4k", cookies_from_browser=None):
         self.log("Launching Stealth Browser to inspect protected media...", 25)
         captured_streams = []
         page_title = ["Captured_Media"]
 
         with sync_playwright() as p:
-            # Launch Chrome with stealth arguments
+            # Launch Chrome with maximum stealth arguments
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -597,7 +620,7 @@ class StealthStreamInterceptor:
                 ]
             )
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
                 device_scale_factor=1,
                 has_touch=False,
@@ -606,28 +629,142 @@ class StealthStreamInterceptor:
                 timezone_id="America/New_York",
             )
 
-            # Injected stealth evasions
+            # 1. Kill Rogue Popup Windows / Tabs Immediately (defeats clickjacking and popup ad networks)
+            def handle_popup(new_page):
+                try:
+                    new_page.close()
+                except Exception:
+                    pass
+            context.on("page", handle_popup)
+
+            # 2. Local Browser Cookie Authentication Import
+            if cookies_from_browser:
+                try:
+                    import yt_dlp.cookies as ytc
+                    jar = ytc.extract_cookies_from_browser(cookies_from_browser)
+                    pw_cookies = []
+                    for c in jar:
+                        if c.name and c.value and c.domain:
+                            pw_cookies.append({
+                                "name": c.name,
+                                "value": c.value,
+                                "domain": c.domain if (c.domain.startswith(".") or "." in c.domain) else f".{c.domain}",
+                                "path": c.path or "/",
+                                "expires": c.expires if c.expires else -1,
+                                "httpOnly": bool(c.has_nonstandard_attr("HttpOnly")),
+                                "secure": bool(c.secure),
+                            })
+                    if pw_cookies:
+                        context.add_cookies(pw_cookies)
+                        self.log(f"Inherited {len(pw_cookies)} authenticated session cookie(s) from {cookies_from_browser.capitalize()}", 28)
+                except Exception as c_err:
+                    self.log(f"Browser cookie notice: {c_err}", 27)
+
+            # 3. Injected Maximum Armor Stealth Camouflage Script
             context.add_init_script("""
+                // Webdriver automation removal
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+                // Emulate genuine Chrome runtime
                 window.chrome = {
-                    runtime: {},
-                    loadTimes: () => {},
-                    csi: () => {},
-                    app: {}
+                    runtime: {
+                        OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update' },
+                        PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', LINUX: 'linux' },
+                    },
+                    loadTimes: () => ({
+                        commitLoadTime: Date.now() / 1000,
+                        connectionInfo: 'http/2+quic/43',
+                        finishDocumentLoadTime: Date.now() / 1000,
+                        firstPaintTime: Date.now() / 1000,
+                        navigationType: 'Other',
+                        wasFetchedViaSpdy: true,
+                    }),
+                    csi: () => ({ startE: Date.now() - 300, onloadT: Date.now(), pageT: 300, tran: 15 }),
+                    app: { isInstalled: false }
                 };
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+
+                // Realistic Chrome plugins
+                const mockPlugins = [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                ];
+                Object.defineProperty(navigator, 'plugins', { get: () => mockPlugins });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
                 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+
+                // WebGL GPU Vendor & Renderer Masking
                 const getParam = WebGLRenderingContext.prototype.getParameter;
                 WebGLRenderingContext.prototype.getParameter = function(param) {
-                    if (param === 37445) return 'Intel Inc.';
-                    if (param === 37446) return 'Intel Iris OpenGL Engine';
+                    if (param === 37445) return 'Google Inc. (NVIDIA)';
+                    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)';
                     return getParam.apply(this, arguments);
                 };
+                if (window.WebGL2RenderingContext) {
+                    const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+                    WebGL2RenderingContext.prototype.getParameter = function(param) {
+                        if (param === 37445) return 'Google Inc. (NVIDIA)';
+                        if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                        return getParam2.apply(this, arguments);
+                    };
+                }
+
+                // Sub-perceptual Canvas Fingerprint Noise
+                const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(type) {
+                    if (!type || type === 'image/png') {
+                        const ctx = this.getContext('2d');
+                        if (ctx) {
+                            try {
+                                const img = ctx.getImageData(0, 0, Math.min(this.width, 2), Math.min(this.height, 2));
+                                img.data[0] = (img.data[0] ^ 1);
+                                ctx.putImageData(img, 0, 0);
+                            } catch(e) {}
+                        }
+                    }
+                    return origToDataURL.apply(this, arguments);
+                };
+
+                // AudioContext Fingerprint Noise
+                if (window.AudioBuffer) {
+                    const origGetChannelData = AudioBuffer.prototype.getChannelData;
+                    AudioBuffer.prototype.getChannelData = function() {
+                        const res = origGetChannelData.apply(this, arguments);
+                        if (res && res.length > 0) {
+                            res[0] = res[0] + 0.0000001;
+                        }
+                        return res;
+                    };
+                }
+
+                // CDP automation cleanup
+                try {
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+                } catch(e) {}
             """)
 
             page = context.new_page()
+
+            # 4. Network-Level Ad & Tracker Route Aborting
+            def adblock_router(route):
+                try:
+                    req = route.request
+                    u = req.url
+                    parsed = urlparse(u)
+                    host = parsed.netloc.lower()
+                    res_type = req.resource_type
+                    if AD_AND_TRACKER_DOMAINS.search(host) or (res_type in ("image", "font", "media", "script") and AD_PATH_KEYWORDS.search(parsed.path)):
+                        route.abort()
+                        return
+                except Exception:
+                    pass
+                route.continue_()
+
+            page.route("**/*", adblock_router)
 
             def handle_response(response):
                 r_url = response.url
@@ -636,8 +773,11 @@ class StealthStreamInterceptor:
                 if already_captured:
                     return
 
-                # Skip analytics, images, tracking pixels
-                if any(ign in r_url.lower() for ign in ("google-analytics", "doubleclick", "/favicon", ".png", ".jpg", ".svg", ".css")):
+                # Skip analytics, images, tracking pixels, ads
+                r_lower = r_url.lower()
+                if any(ign in r_lower for ign in ("google-analytics", "doubleclick", "/favicon", ".png", ".jpg", ".svg", ".css", "googleads", "imasdk")):
+                    return
+                if re.search(r'(?:/ads/|/ad/|preroll|midroll|bumper|watermark|banner)', r_lower):
                     return
 
                 if ".m3u8" in r_url or "application/vnd.apple.mpegurl" in ct or "application/x-mpegurl" in ct:
@@ -680,6 +820,21 @@ class StealthStreamInterceptor:
                             } catch(e) {}
                         }
                     }""")
+                except Exception:
+                    pass
+
+                # 0. Detect and auto-resolve Cloudflare Turnstile / anti-bot verification challenges
+                try:
+                    for fr in page.frames:
+                        if "challenges.cloudflare.com" in fr.url or "cloudflare" in fr.url:
+                            self.log("Cloudflare Turnstile verification challenge detected. Engaging automated human interaction...", 48)
+                            try:
+                                box = fr.wait_for_selector('input[type="checkbox"], .ctp-checkbox-label, #challenge-stage', timeout=3500)
+                                if box:
+                                    box.click()
+                                    time.sleep(2)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 

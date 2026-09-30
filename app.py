@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore", message=".*duckduckgo_search.*")
 
 import atexit
 import importlib
+import mimetypes
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, Response
 from werkzeug.exceptions import HTTPException
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,10 +58,15 @@ from engines import (
     search_videos,
     search_web,
     JobStore,
+    convert_media,
+    probe_media,
+    PRESETS,
+    get_engine_versions,
+    upgrade_engine,
 )
 
 # Re-exported for callers that import them from `app` (scripts, tests).
-__all__ = ["app", "download_batch", "search_videos", "search_web"]
+__all__ = ["app", "download_batch", "search_videos", "search_web", "convert_media", "probe_media"]
 import yt_dlp
 
 DownloadCancelled = getattr(yt_dlp.utils, "DownloadCancelled", None)
@@ -580,6 +586,8 @@ def _make_pp_hook(job_id):
                 msg = "Embedding subtitles..."
             elif "ThumbnailsConvertor" in name:
                 msg = "Preparing cover art..."
+            elif "SponsorBlock" in name or "ModifyChapters" in name:
+                msg = "Excising sponsor & promo segments (SponsorBlock)..."
             else:
                 msg = "Finalizing media..."
             _update_job(job_id, status="processing", percent=98.0, phase="processing", message=msg)
@@ -600,7 +608,7 @@ def _was_cancelled(job_id, exc):
 # ---------------------------------------------------------------------------
 # Background task bodies
 # ---------------------------------------------------------------------------
-def _run_download_task(job_id, url, quality, use_turbo, output_path=None, use_stealth=True):
+def _run_download_task(job_id, url, quality, use_turbo, output_path=None, use_stealth=True, remove_sponsors=True, cookies_from_browser=None):
     if _is_cancelled(job_id):
         _finish_cancelled(job_id, "Download cancelled.")
         return
@@ -623,9 +631,11 @@ def _run_download_task(job_id, url, quality, use_turbo, output_path=None, use_st
             progress_hook=_make_progress_hook(job_id),
             postprocessor_hook=_make_pp_hook(job_id),
             use_turbo=use_turbo,
+            cookies_from_browser=cookies_from_browser,
             status_callback=status_cb,
             use_stealth=use_stealth,
             cancel_check=lambda: _is_cancelled(job_id),
+            remove_sponsors=remove_sponsors,
         )
         if _is_cancelled(job_id):
             _finish_cancelled(job_id, "Download cancelled.")
@@ -722,7 +732,57 @@ def _run_social_task(job_id, url, output_path=None):
             _fail(job_id, e)
 
 
-def _run_audio_task(job_id, source, fmt, bitrate, meta, output_path=None):
+def _run_convert_task(job_id, input_path, output_dir=None, output_filename=None, preset="discord_25mb",
+                      start_time=None, end_time=None, custom_bitrate=None, custom_crf=None, custom_res=None):
+    if _is_cancelled(job_id):
+        _finish_cancelled(job_id, "Conversion cancelled.")
+        return
+
+    _update_job(job_id, status="processing", message=f"Optimizing media ({preset})...")
+    try:
+        def on_prog(pct, msg):
+            if _is_cancelled(job_id):
+                _raise_cancel()
+            _update_job(job_id, percent=pct, message=msg)
+
+        res = convert_media(
+            input_path,
+            output_dir=_sanitize_output_path(output_dir),
+            output_filename=output_filename,
+            preset=preset,
+            start_time=start_time,
+            end_time=end_time,
+            custom_bitrate=custom_bitrate,
+            custom_crf=custom_crf,
+            custom_resolution=custom_res,
+            progress_callback=on_prog,
+            cancel_check=lambda: _is_cancelled(job_id),
+        )
+        if _is_cancelled(job_id):
+            _finish_cancelled(job_id, "Conversion cancelled.")
+            return
+
+        fpath = res.get("filepath")
+        fname = res.get("filename")
+        _update_job(
+            job_id,
+            status="done",
+            percent=100.0,
+            title=fname,
+            filepath=fpath,
+            filename=fname,
+            downloaded_files=[fpath],
+            finished=time.time(),
+            message=f"Optimized successfully: {fname} ({res.get('size_mb')} MB)",
+        )
+    except Exception as e:
+        if _was_cancelled(job_id, e):
+            _finish_cancelled(job_id, "Conversion cancelled.")
+        else:
+            _fail(job_id, e)
+
+
+def _run_audio_task(job_id, source, fmt, bitrate, meta, output_path=None, remove_sponsors=True):
     if _is_cancelled(job_id):
         _finish_cancelled(job_id)
         return
@@ -739,6 +799,7 @@ def _run_audio_task(job_id, source, fmt, bitrate, meta, output_path=None):
             artist=(meta or {}).get("artist"),
             album=(meta or {}).get("album"),
             cancel_check=lambda: _is_cancelled(job_id),
+            remove_sponsors=remove_sponsors,
         )
         if _is_cancelled(job_id):
             _finish_cancelled(job_id)
@@ -939,10 +1000,22 @@ def _start_download(data, job_type):
         quality = '4k'
     use_turbo = _as_bool(data.get('use_turbo'), True)
     use_stealth = _as_bool(data.get('use_stealth'), True)
+    remove_sponsors = _as_bool(data.get('remove_sponsors'), True)
+    cookies_from_browser = _clean_str(data.get('cookies_from_browser')) or None
     output_path = _clean_str(data.get('output_path'))
 
     job_id = _new_job(job_type=job_type)
-    EXECUTOR.submit(_run_download_task, job_id, url, quality, use_turbo, output_path, use_stealth)
+    EXECUTOR.submit(
+        _run_download_task,
+        job_id,
+        url,
+        quality,
+        use_turbo,
+        output_path,
+        use_stealth,
+        remove_sponsors,
+        cookies_from_browser,
+    )
     return job_id, None
 
 
@@ -1059,6 +1132,8 @@ def api_playlist_download():
         quality = '1080p'
     use_turbo = _as_bool(data.get('use_turbo'), True)
     use_stealth = _as_bool(data.get('use_stealth'), True)
+    remove_sponsors = _as_bool(data.get('remove_sponsors'), True)
+    cookies_from_browser = _clean_str(data.get('cookies_from_browser')) or None
     output_path = _clean_str(data.get('output_path'))
 
     if not urls:
@@ -1074,7 +1149,17 @@ def api_playlist_download():
             continue
         seen.add(u)
         jid = _new_job(job_type="batch_item")
-        EXECUTOR.submit(_run_download_task, jid, u, quality, use_turbo, output_path, use_stealth)
+        EXECUTOR.submit(
+            _run_download_task,
+            jid,
+            u,
+            quality,
+            use_turbo,
+            output_path,
+            use_stealth,
+            remove_sponsors,
+            cookies_from_browser,
+        )
         job_ids.append(jid)
 
     if not job_ids:
@@ -1106,6 +1191,7 @@ def api_audio_rip():
     source = _clean_str(data.get('source'))
     fmt = _clean_str(data.get('format')).lower() or 'mp3'
     bitrate = _clean_str(data.get('bitrate')).lower() or '320k'
+    remove_sponsors = _as_bool(data.get('remove_sponsors'), True)
     raw_meta = data.get('metadata') or {}
     meta = {k: _clean_str(raw_meta.get(k), limit=256) for k in ("title", "artist", "album")} if isinstance(raw_meta, dict) else {}
     output_path = _clean_str(data.get('output_path'))
@@ -1125,7 +1211,7 @@ def api_audio_rip():
         return jsonify({"error": "Local source file not found."}), 400
 
     job_id = _new_job(job_type="audio_rip")
-    EXECUTOR.submit(_run_audio_task, job_id, source, fmt, bitrate, meta, output_path)
+    EXECUTOR.submit(_run_audio_task, job_id, source, fmt, bitrate, meta, output_path, remove_sponsors)
     return jsonify({"status": "started", "job_id": job_id})
 
 
@@ -1353,6 +1439,227 @@ def api_status():
         "ready": True,
         "timestamp": time.time()
     })
+
+
+def _detect_installed_browsers():
+    """Detect available local browsers with profiles that can supply cookies."""
+    found = []
+    appdata = os.environ.get('APPDATA', '')
+    localappdata = os.environ.get('LOCALAPPDATA', '')
+    user_home = os.path.expanduser('~')
+
+    checks = [
+        ("chrome", "Google Chrome", "fab fa-chrome", [
+            os.path.join(localappdata, "Google", "Chrome", "User Data"),
+            os.path.join(user_home, "Library", "Application Support", "Google", "Chrome"),
+            os.path.join(user_home, ".config", "google-chrome"),
+        ]),
+        ("edge", "Microsoft Edge", "fab fa-edge", [
+            os.path.join(localappdata, "Microsoft", "Edge", "User Data"),
+            os.path.join(user_home, "Library", "Application Support", "Microsoft Edge"),
+            os.path.join(user_home, ".config", "microsoft-edge"),
+        ]),
+        ("brave", "Brave Browser", "fab fa-shield-alt", [
+            os.path.join(localappdata, "BraveSoftware", "Brave-Browser", "User Data"),
+            os.path.join(user_home, "Library", "Application Support", "BraveSoftware", "Brave-Browser"),
+            os.path.join(user_home, ".config", "BraveSoftware", "Brave-Browser"),
+        ]),
+        ("firefox", "Mozilla Firefox", "fab fa-firefox-browser", [
+            os.path.join(appdata, "Mozilla", "Firefox", "Profiles"),
+            os.path.join(user_home, "Library", "Application Support", "Firefox", "Profiles"),
+            os.path.join(user_home, ".mozilla", "firefox"),
+        ]),
+        ("opera", "Opera", "fab fa-opera", [
+            os.path.join(appdata, "Opera Software", "Opera Stable"),
+            os.path.join(user_home, "Library", "Application Support", "com.operasoftware.Opera"),
+            os.path.join(user_home, ".config", "opera"),
+        ]),
+        ("vivaldi", "Vivaldi", "fas fa-compass", [
+            os.path.join(localappdata, "Vivaldi", "User Data"),
+            os.path.join(user_home, ".config", "vivaldi"),
+        ]),
+    ]
+
+    for browser_id, name, icon, paths in checks:
+        detected = any(os.path.exists(p) for p in paths if p)
+        found.append({
+            "id": browser_id,
+            "name": name,
+            "icon": icon,
+            "detected": detected
+        })
+
+    return found
+
+
+@app.route('/api/browser_cookies/detect', methods=['GET'])
+def api_browser_cookies_detect():
+    """List detected browser cookie repositories available for stealth authenticated extraction."""
+    try:
+        browsers = _detect_installed_browsers()
+        return jsonify({"status": "success", "browsers": browsers})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/media/stream', methods=['GET'])
+def api_media_stream():
+    """Stream a local audio or video file with HTTP Range support (RFC 7233)."""
+    raw_path = request.args.get('path') or request.args.get('file_path') or request.args.get('file')
+    if not raw_path:
+        return jsonify({"error": "Path parameter is required."}), 400
+
+    filepath = _safe_local_path(raw_path)
+    if not filepath or not os.path.isfile(filepath):
+        return jsonify({"error": "File not found or invalid path."}), 404
+
+    try:
+        file_size = os.path.getsize(filepath)
+    except OSError as e:
+        return jsonify({"error": f"Cannot access file: {e}"}), 404
+
+    content_type, _ = mimetypes.guess_type(filepath)
+    if not content_type:
+        ext = os.path.splitext(filepath)[1].lower()
+        content_type = {
+            ".mp4": "video/mp4",
+            ".mkv": "video/x-matroska",
+            ".webm": "video/webm",
+            ".mov": "video/quicktime",
+            ".avi": "video/x-msvideo",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+            ".ogg": "audio/ogg",
+            ".opus": "audio/opus",
+        }.get(ext, "application/octet-stream")
+
+    range_header = request.headers.get('Range', None)
+    if not range_header:
+        def full_generator():
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        resp = Response(full_generator(), 200, mimetype=content_type, direct_passthrough=True)
+        resp.headers['Content-Length'] = str(file_size)
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
+
+    # Parse byte range header (e.g. bytes=0-1024 or bytes=1024-)
+    m = re.match(r'bytes=(\d+)-(\d+)?', range_header.strip())
+    if not m:
+        resp = Response(status=416)
+        resp.headers['Content-Range'] = f'bytes */{file_size}'
+        return resp
+
+    g = m.groups()
+    byte1 = int(g[0])
+    byte2 = int(g[1]) if g[1] is not None else None
+
+    if byte1 >= file_size or (byte2 is not None and (byte2 >= file_size or byte1 > byte2)):
+        resp = Response(status=416)
+        resp.headers['Content-Range'] = f'bytes */{file_size}'
+        return resp
+
+    length = file_size - byte1 if byte2 is None else (byte2 - byte1 + 1)
+    end_byte = file_size - 1 if byte2 is None else byte2
+
+    def range_generator(start, count):
+        with open(filepath, 'rb') as f:
+            f.seek(start)
+            remaining = count
+            chunk_size = 64 * 1024
+            while remaining > 0:
+                to_read = min(chunk_size, remaining)
+                data = f.read(to_read)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    resp = Response(range_generator(byte1, length), 206, mimetype=content_type, direct_passthrough=True)
+    resp.headers['Content-Range'] = f'bytes {byte1}-{end_byte}/{file_size}'
+    resp.headers['Accept-Ranges'] = 'bytes'
+    resp.headers['Content-Length'] = str(length)
+    return resp
+
+
+@app.route('/api/convert/presets', methods=['GET'])
+def api_convert_presets():
+    """Return catalog of media conversion, compression, and trimming presets."""
+    preset_list = []
+    for key, info in PRESETS.items():
+        preset_list.append({
+            "id": key,
+            "name": info.get("name", key),
+            "description": info.get("description", ""),
+            "format": info.get("format", ""),
+            "type": info.get("type", "video"),
+            "target_size_mb": info.get("target_size_mb"),
+        })
+    return jsonify({"status": "success", "presets": preset_list})
+
+
+@app.route('/api/convert/probe', methods=['POST'])
+def api_convert_probe():
+    """Probe a media file with ffprobe to extract detailed technical specs."""
+    data = _json_body()
+    raw = data.get('path') or data.get('file_path')
+    filepath = _safe_local_path(raw)
+    if not filepath or not os.path.isfile(filepath):
+        return jsonify({"error": f"File not found: '{raw}'"}), 404
+    try:
+        info = probe_media(filepath)
+        return jsonify({"status": "success", "media": info})
+    except Exception as e:
+        return jsonify({"error": f"Failed to probe media: {e}"}), 500
+
+
+@app.route('/api/convert/start', methods=['POST'])
+def api_convert_start():
+    """Start an asynchronous media conversion / compression / trimming job."""
+    data = _json_body()
+    raw = data.get('path') or data.get('file_path')
+    filepath = _safe_local_path(raw)
+    if not filepath or not os.path.isfile(filepath):
+        return jsonify({"error": f"Source file not found: '{raw}'"}), 404
+
+    preset = _clean_str(data.get('preset')) or "discord_25mb"
+    custom_args = data.get('custom_args') or {}
+    output_path = _clean_str(data.get('output_path'))
+
+    job_id = _new_job(job_type="convert")
+    EXECUTOR.submit(_run_convert_task, job_id, filepath, preset, custom_args, output_path)
+    return jsonify({"status": "started", "job_id": job_id})
+
+
+@app.route('/api/engine/check_updates', methods=['GET'])
+def api_engine_check_updates():
+    """Check PyPI for newer versions of core extraction engines (yt-dlp & gallery-dl)."""
+    try:
+        versions = get_engine_versions()
+        return jsonify(versions)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/engine/update', methods=['POST'])
+def api_engine_update():
+    """Upgrade an engine package (yt-dlp, gallery-dl, or all) to latest version."""
+    data = _json_body()
+    engine = _clean_str(data.get('engine')) or "yt-dlp"
+    try:
+        res = upgrade_engine(engine)
+        return jsonify({"status": "success", "result": res})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 @atexit.register

@@ -107,10 +107,11 @@ def _check_cancel(cancel_check):
 
 
 def rip_and_tag_audio(source, output_path, target_format="mp3", bitrate="320k",
-                      title=None, artist=None, album=None, cancel_check=None):
+                      title=None, artist=None, album=None, cancel_check=None,
+                      remove_sponsors=True):
     """
     Rip audio from a URL, or transcode a local media file, into MP3/FLAC/AAC/WAV
-    with ID3 (or equivalent) tagging.
+    with ID3 (or equivalent) tagging and automated SponsorBlock excision.
     """
     os.makedirs(output_path, exist_ok=True)
     target_format = _normalise_format(target_format)
@@ -126,13 +127,13 @@ def rip_and_tag_audio(source, output_path, target_format="mp3", bitrate="320k",
 
     if src_str.lower().startswith(("http://", "https://")):
         return _rip_from_url(src_str, output_path, target_format, container_ext,
-                             quality, title, artist, album, cancel_check)
+                             quality, title, artist, album, cancel_check, remove_sponsors)
     return _convert_local(src_str, output_path, target_format, container_ext,
                           quality, title, artist, album, cancel_check)
 
 
 def _rip_from_url(source, output_path, target_format, container_ext, quality,
-                  title, artist, album, cancel_check):
+                  title, artist, album, cancel_check, remove_sponsors=True):
     session = uuid.uuid4().hex[:8]
     stage_dir = os.path.join(tempfile.gettempdir(), f"audio_stage_{session}")
     temp_dir = os.path.join(tempfile.gettempdir(), f"audio_temp_{session}")
@@ -154,6 +155,19 @@ def _rip_from_url(source, output_path, target_format, container_ext, quality,
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
             {"key": "FFmpegMetadata"},
             {"key": "EmbedThumbnail"},
+        ]
+
+    if remove_sponsors:
+        postprocessors += [
+            {
+                "key": "SponsorBlock",
+                "categories": {"all"},
+                "when": "after_filter"
+            },
+            {
+                "key": "ModifyChapters",
+                "remove_sponsor_segments": {"all"}
+            }
         ]
 
     ydl_opts = {

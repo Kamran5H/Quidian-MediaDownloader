@@ -549,6 +549,8 @@ document.addEventListener("DOMContentLoaded", () => {
     initDestinationSystem();
     initFolderSearchSystem();
     loadLibrary();
+    initCookieVault();
+    checkEngineUpdatesSilent();
 
     // Keybindings: Enter key on inputs triggers actions
     document.getElementById("video-url")?.addEventListener("keydown", (e) => {
@@ -584,6 +586,8 @@ function switchModule(moduleId, btnElement) {
 
     if (moduleId === "library-module") {
         loadLibrary();
+    } else if (moduleId === "compressor-module") {
+        updateCompressorDestinationDisplay();
     }
 }
 
@@ -702,6 +706,8 @@ async function executeDownloadByLink(url, outputPath) {
     const qualitySelect = document.getElementById("link-quality");
     const turboToggle = document.getElementById("link-turbo-toggle");
     const stealthToggle = document.getElementById("link-stealth-toggle");
+    const sponsorblockToggle = document.getElementById("link-sponsorblock-toggle");
+    const cookieSelect = document.getElementById("link-cookie-source");
     const statusBox = document.getElementById("link-status");
     const btn = document.getElementById("btn-download-video");
     const progressCard = document.getElementById("link-progress");
@@ -709,6 +715,8 @@ async function executeDownloadByLink(url, outputPath) {
     const quality = qualitySelect ? qualitySelect.value : "4k";
     const useTurbo = turboToggle ? turboToggle.checked : true;
     const useStealth = stealthToggle ? stealthToggle.checked : true;
+    const removeSponsors = sponsorblockToggle ? sponsorblockToggle.checked : true;
+    const cookiesFromBrowser = cookieSelect ? cookieSelect.value : "";
 
     setBtnLoading(btn, true);
     resetProgress();
@@ -719,7 +727,15 @@ async function executeDownloadByLink(url, outputPath) {
         const res = await fetch("/api/download_video", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url, quality, use_turbo: useTurbo, use_stealth: useStealth, output_path: outputPath })
+            body: JSON.stringify({
+                url,
+                quality,
+                use_turbo: useTurbo,
+                use_stealth: useStealth,
+                remove_sponsors: removeSponsors,
+                cookies_from_browser: cookiesFromBrowser,
+                output_path: outputPath
+            })
         });
         const data = await res.json();
 
@@ -732,13 +748,23 @@ async function executeDownloadByLink(url, outputPath) {
                     const actions = [];
                     if (primaryPath) {
                         actions.push({
-                            label: "▶ Open Video",
+                            label: "▶ Stream in App",
+                            className: "btn-card-stream",
+                            onClick: () => openMediaPlayer(primaryPath, finalData.title || 'Media')
+                        });
+                        actions.push({
+                            label: "⚡ Studio Compress",
+                            className: "btn-card-compress",
+                            onClick: () => sendPlayerFileToCompressor(primaryPath)
+                        });
+                        actions.push({
+                            label: "🚀 Open OS",
                             className: "btn-card-action done-open",
                             onClick: () => openLibraryFile(primaryPath)
                         });
                     }
                     actions.push({
-                        label: "📁 Open Folder",
+                        label: "📁 Folder",
                         className: "btn-card-action",
                         onClick: () => openFolder()
                     });
@@ -1288,8 +1314,12 @@ async function executeDownloadSearchResult(url, idx, outputPath) {
     const quality = document.getElementById("search-quality")?.value || "4k";
     const turboToggle = document.getElementById("search-turbo-toggle");
     const stealthToggle = document.getElementById("search-stealth-toggle");
+    const sponsorblockToggle = document.getElementById("search-sponsorblock-toggle");
+    const cookieSelect = document.getElementById("link-cookie-source");
     const useTurbo = turboToggle ? turboToggle.checked : true;
     const useStealth = stealthToggle ? stealthToggle.checked : true;
+    const removeSponsors = sponsorblockToggle ? sponsorblockToggle.checked : true;
+    const cookiesFromBrowser = cookieSelect ? cookieSelect.value : "";
 
     const btn = document.getElementById(`btn-result-${idx}`);
     const progSlot = document.getElementById(`card-prog-${idx}`);
@@ -1323,7 +1353,15 @@ async function executeDownloadSearchResult(url, idx, outputPath) {
         const res = await fetch("/api/download_video", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url, quality, use_turbo: useTurbo, use_stealth: useStealth, output_path: outputPath })
+            body: JSON.stringify({
+                url,
+                quality,
+                use_turbo: useTurbo,
+                use_stealth: useStealth,
+                remove_sponsors: removeSponsors,
+                cookies_from_browser: cookiesFromBrowser,
+                output_path: outputPath
+            })
         });
         const data = await res.json().catch(() => ({}));
 
@@ -1877,21 +1915,40 @@ function buildLibraryCard(file) {
 
     const actions = el("div");
     actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
+    actions.style.flexWrap = "wrap";
+    actions.style.gap = "0.4rem";
     actions.style.marginTop = "0.6rem";
 
-    const playBtn = el("button", "btn-lib-action", "\u25B6 Play / Open");
-    playBtn.type = "button";
-    playBtn.style.flex = "1.2";
-    playBtn.addEventListener("click", () => openLibraryFile(file.path));
-    actions.appendChild(playBtn);
+    const streamBtn = el("button", "btn-lib-action", "\u25B6 Stream");
+    streamBtn.type = "button";
+    streamBtn.style.flex = "1";
+    streamBtn.title = "Play instantly in Ad-Free In-App Streamer";
+    streamBtn.addEventListener("click", () => openMediaPlayer(file.path, file.name));
+    actions.appendChild(streamBtn);
 
-    const revealBtn = el("button", "btn-lib-action", "\uD83D\uDCC1 Reveal");
+    const compressBtn = el("button", "btn-lib-action", "\u26A1 Studio");
+    compressBtn.type = "button";
+    compressBtn.style.flex = "1";
+    compressBtn.style.background = "rgba(6, 182, 212, 0.15)";
+    compressBtn.style.borderColor = "rgba(6, 182, 212, 0.35)";
+    compressBtn.style.color = "#67e8f9";
+    compressBtn.title = "Open in Media Compressor Studio (Discord, Web, Cut)";
+    compressBtn.addEventListener("click", () => sendToCompressor(file.path));
+    actions.appendChild(compressBtn);
+
+    const openBtn = el("button", "btn-lib-action", "\uD83D\uDE80 OS");
+    openBtn.type = "button";
+    openBtn.style.flex = "0.8";
+    openBtn.title = "Launch in default Windows desktop media player";
+    openBtn.addEventListener("click", () => openLibraryFile(file.path));
+    actions.appendChild(openBtn);
+
+    const revealBtn = el("button", "btn-lib-action", "\uD83D\uDCC1");
     revealBtn.type = "button";
-    revealBtn.style.flex = "0.8";
+    revealBtn.style.flex = "0.5";
     revealBtn.style.background = "rgba(255,255,255,0.07)";
     revealBtn.style.borderColor = "rgba(255,255,255,0.15)";
-    revealBtn.title = "Highlight in the file manager";
+    revealBtn.title = "Highlight file in File Explorer";
     revealBtn.addEventListener("click", () => revealLibraryFile(file.path));
     actions.appendChild(revealBtn);
 
@@ -2287,5 +2344,451 @@ function downloadFromCinemaModal() {
     window.addEventListener("online", checkHealth);
     window.addEventListener("focus", checkHealth);
 })();
+
+// =========================================================================
+// 11. STEALTH BROWSER COOKIE VAULT
+// =========================================================================
+async function initCookieVault() {
+    const select = document.getElementById("link-cookie-source");
+    const hint = document.getElementById("link-cookie-hint");
+    if (!select) return;
+
+    try {
+        const res = await fetch("/api/browser_cookies/detect");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && Array.isArray(data.browsers)) {
+            let detectedCount = 0;
+            data.browsers.forEach(b => {
+                const opt = document.createElement("option");
+                opt.value = b.id;
+                opt.textContent = `${b.name} ${b.detected ? "⚡ [Detected Profile]" : "(Not Detected)"}`;
+                if (b.detected) detectedCount++;
+                select.appendChild(opt);
+            });
+            if (hint) {
+                hint.textContent = detectedCount > 0 ? `${detectedCount} browser profile(s) ready` : "No installed profiles detected";
+            }
+        }
+    } catch (e) {
+        console.warn("Could not probe browser cookies:", e);
+    }
+}
+
+// =========================================================================
+// 12. CORE EXTRACTION ENGINES AUTO-UPDATER
+// =========================================================================
+async function checkEngineUpdatesSilent() {
+    try {
+        const res = await fetch("/api/engine/check_updates");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.engines) {
+            const ytdlp = data.engines["yt-dlp"] || {};
+            const gallery = data.engines["gallery-dl"] || {};
+            const pillText = document.getElementById("text-updates");
+            const pillDot = document.getElementById("dot-updates");
+            const needsUpdate = ytdlp.needs_update || gallery.needs_update;
+
+            if (pillText) {
+                pillText.textContent = `yt-dlp: v${ytdlp.installed || 'latest'} ${needsUpdate ? "▲ Update" : "⚡"}`;
+            }
+            if (pillDot) {
+                pillDot.className = needsUpdate ? "pulse-dot amber" : "pulse-dot green";
+            }
+        }
+    } catch (e) {
+        console.warn("Silent engine update check failed:", e);
+    }
+}
+
+function openEngineUpdateModal() {
+    const modal = document.getElementById("engine-updater-modal");
+    if (modal) modal.classList.remove("hidden");
+    refreshEngineStatusModal();
+}
+
+function closeEngineUpdateModal() {
+    const modal = document.getElementById("engine-updater-modal");
+    if (modal) modal.classList.add("hidden");
+}
+
+async function refreshEngineStatusModal() {
+    const ytdlpLabel = document.getElementById("ytdlp-ver-label");
+    const galleryLabel = document.getElementById("gallerydl-ver-label");
+    if (ytdlpLabel) ytdlpLabel.textContent = "Checking PyPI repository...";
+    if (galleryLabel) galleryLabel.textContent = "Checking PyPI repository...";
+
+    try {
+        const res = await fetch("/api/engine/check_updates");
+        if (!res.ok) throw new Error("Failed to check versions");
+        const data = await res.json();
+        if (data && data.engines) {
+            const ytdlp = data.engines["yt-dlp"] || {};
+            const gallery = data.engines["gallery-dl"] || {};
+
+            if (ytdlpLabel) {
+                ytdlpLabel.innerHTML = `Installed: <strong>${ytdlp.installed || 'Unknown'}</strong> &bull; PyPI Latest: <strong style="color:var(--aurora-2)">${ytdlp.latest || 'N/A'}</strong> ${ytdlp.needs_update ? "⚠️ (Update Available)" : "✅ (Latest)"}`;
+            }
+            if (galleryLabel) {
+                galleryLabel.innerHTML = `Installed: <strong>${gallery.installed || 'Unknown'}</strong> &bull; PyPI Latest: <strong style="color:var(--aurora-2)">${gallery.latest || 'N/A'}</strong> ${gallery.needs_update ? "⚠️ (Update Available)" : "✅ (Latest)"}`;
+            }
+        }
+    } catch (e) {
+        if (ytdlpLabel) ytdlpLabel.textContent = "Could not reach PyPI";
+        if (galleryLabel) galleryLabel.textContent = "Could not reach PyPI";
+    }
+}
+
+async function runEngineUpdate(engine) {
+    const progressBox = document.getElementById("updater-progress-box");
+    const progressText = document.getElementById("updater-progress-text");
+    const btnAll = document.getElementById("btn-update-all-engines");
+    const btnSingleYt = document.getElementById("btn-update-ytdlp");
+    const btnSingleGal = document.getElementById("btn-update-gallerydl");
+
+    if (progressBox) progressBox.classList.remove("hidden");
+    if (progressText) progressText.textContent = `Upgrading ${engine} via pip in background...`;
+    if (btnAll) btnAll.disabled = true;
+    if (btnSingleYt) btnSingleYt.disabled = true;
+    if (btnSingleGal) btnSingleGal.disabled = true;
+
+    try {
+        const res = await fetch("/api/engine/update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ engine })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            if (progressText) progressText.textContent = `Upgrade complete: ${JSON.stringify(data.result)}`;
+            refreshEngineStatusModal();
+            checkEngineUpdatesSilent();
+            setTimeout(() => {
+                if (progressBox) progressBox.classList.add("hidden");
+            }, 3000);
+        } else {
+            if (progressText) progressText.textContent = `Error: ${data.error || 'Failed'}`;
+        }
+    } catch (e) {
+        if (progressText) progressText.textContent = `Update network error: ${e.message}`;
+    } finally {
+        if (btnAll) btnAll.disabled = false;
+        if (btnSingleYt) btnSingleYt.disabled = false;
+        if (btnSingleGal) btnSingleGal.disabled = false;
+    }
+}
+
+// =========================================================================
+// 13. IN-APP AD-FREE RANGE STREAMING MEDIA PLAYER
+// =========================================================================
+let currentPlayingMediaFilePath = "";
+
+function openMediaPlayer(filepath, title) {
+    if (!filepath) return;
+    currentPlayingMediaFilePath = filepath;
+
+    const modal = document.getElementById("media-player-modal");
+    const titleEl = document.getElementById("player-media-title");
+    const infoEl = document.getElementById("player-file-info-label");
+    const video = document.getElementById("in-app-video-player");
+    const audio = document.getElementById("in-app-audio-player");
+
+    if (titleEl) titleEl.textContent = title || filepath.split(/[\\/]/).pop() || "Media Player";
+    if (infoEl) infoEl.textContent = filepath;
+
+    const ext = filepath.toLowerCase().split('.').pop();
+    const isAudioOnly = ["mp3", "m4a", "wav", "flac", "aac", "ogg", "opus"].includes(ext);
+
+    const streamUrl = `/api/media/stream?path=${encodeURIComponent(filepath)}`;
+
+    if (isAudioOnly) {
+        if (video) { video.classList.add("hidden"); video.pause(); video.src = ""; }
+        if (audio) {
+            audio.classList.remove("hidden");
+            audio.src = streamUrl;
+            audio.play().catch(() => {});
+        }
+    } else {
+        if (audio) { audio.classList.add("hidden"); audio.pause(); audio.src = ""; }
+        if (video) {
+            video.classList.remove("hidden");
+            video.src = streamUrl;
+            video.play().catch(() => {});
+        }
+    }
+
+    if (modal) modal.classList.remove("hidden");
+}
+
+function closeMediaPlayer() {
+    const modal = document.getElementById("media-player-modal");
+    const video = document.getElementById("in-app-video-player");
+    const audio = document.getElementById("in-app-audio-player");
+
+    if (video) { video.pause(); video.src = ""; }
+    if (audio) { audio.pause(); audio.src = ""; }
+    if (modal) modal.classList.add("hidden");
+}
+
+function setPlayerSpeed(speed, btn) {
+    const video = document.getElementById("in-app-video-player");
+    const audio = document.getElementById("in-app-audio-player");
+    if (video) video.playbackRate = speed;
+    if (audio) audio.playbackRate = speed;
+
+    document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+    if (btn) btn.classList.add("active");
+}
+
+function capturePlayerSnapshot() {
+    const video = document.getElementById("in-app-video-player");
+    if (!video || video.classList.contains("hidden") || !video.videoWidth) {
+        alert("Video frame is not currently playing or available for snapshot.");
+        return;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const link = document.createElement("a");
+    link.download = `snapshot_${Date.now()}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+}
+
+function revealCurrentPlayingFile() {
+    if (currentPlayingMediaFilePath) {
+        revealLibraryFile(currentPlayingMediaFilePath);
+    }
+}
+
+function sendPlayerFileToCompressor(filepath) {
+    const targetPath = filepath || currentPlayingMediaFilePath;
+    if (!targetPath) return;
+    closeMediaPlayer();
+    sendToCompressor(targetPath);
+}
+
+// =========================================================================
+// 14. MEDIA COMPRESSOR & STUDIO CONTROLLERS
+// =========================================================================
+let selectedCompressPreset = "discord_25mb";
+let activeConvertJobId = null;
+
+function updateCompressorDestinationDisplay() {
+    const displayEl = document.getElementById("compress-dest-display");
+    if (displayEl && currentDestination) {
+        displayEl.textContent = currentDestination;
+        displayEl.title = currentDestination;
+    }
+}
+
+function selectCompressPreset(presetId, cardEl) {
+    selectedCompressPreset = presetId;
+    document.querySelectorAll(".preset-card").forEach(c => c.classList.remove("active"));
+    if (cardEl) cardEl.classList.add("active");
+}
+
+function toggleTrimSection() {
+    const toggle = document.getElementById("trim-enabled-toggle");
+    const controls = document.getElementById("trim-controls");
+    if (controls) {
+        if (toggle && toggle.checked) {
+            controls.classList.remove("hidden");
+        } else {
+            controls.classList.add("hidden");
+        }
+    }
+}
+
+function sendToCompressor(filepath) {
+    if (!filepath) return;
+    const navBtn = document.querySelector(`[onclick*="compressor-module"]`);
+    switchModule("compressor-module", navBtn);
+
+    const input = document.getElementById("compress-source-path");
+    if (input) {
+        input.value = filepath;
+        onCompressSourceChanged();
+    }
+}
+
+function chooseCompressFileFromLibrary() {
+    const navBtn = document.querySelector(`[onclick*="library-module"]`);
+    switchModule("library-module", navBtn);
+    alert("Click '⚡ Studio' on any file in your Library to load it into Compressor Studio!");
+}
+
+async function onCompressSourceChanged() {
+    const input = document.getElementById("compress-source-path");
+    const path = input ? input.value.trim() : "";
+    if (!path) return;
+    probeCompressSource(path);
+}
+
+async function probeCompressSource(filepath) {
+    const card = document.getElementById("compress-probe-card");
+    const sizeEl = document.getElementById("probe-size");
+    const durEl = document.getElementById("probe-duration");
+    const resEl = document.getElementById("probe-resolution");
+    const vcEl = document.getElementById("probe-vcodec");
+    const acEl = document.getElementById("probe-acodec");
+    const brEl = document.getElementById("probe-bitrate");
+
+    try {
+        const res = await fetch("/api/convert/probe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: filepath })
+        });
+        const data = await res.json();
+        if (res.ok && data.media) {
+            const m = data.media;
+            if (sizeEl) sizeEl.textContent = m.size_mb ? `${m.size_mb} MB` : "--";
+            if (durEl) durEl.textContent = m.duration ? `${m.duration.toFixed(1)}s` : "--";
+            if (resEl) resEl.textContent = (m.width && m.height) ? `${m.width}x${m.height}` : "Audio/No Video";
+            if (vcEl) vcEl.textContent = m.video_codec || "None";
+            if (acEl) acEl.textContent = m.audio_codec || "None";
+            if (brEl) brEl.textContent = m.bitrate_kbps ? `${Math.round(m.bitrate_kbps)} kbps` : "--";
+            if (card) card.classList.remove("hidden");
+        }
+    } catch (e) {
+        console.warn("Probe failed:", e);
+    }
+}
+
+async function startConversion() {
+    const input = document.getElementById("compress-source-path");
+    const statusBox = document.getElementById("convert-status");
+    const progressCard = document.getElementById("convert-progress");
+    const btn = document.getElementById("btn-start-convert");
+
+    const filepath = input ? input.value.trim() : "";
+    if (!filepath) {
+        showStatus(statusBox, "Please select or paste a source media file.", "error");
+        return;
+    }
+
+    const trimToggle = document.getElementById("trim-enabled-toggle");
+    const isTrim = trimToggle ? trimToggle.checked : false;
+    const startTime = document.getElementById("trim-start-time")?.value?.trim() || "";
+    const endTime = document.getElementById("trim-end-time")?.value?.trim() || "";
+    const losslessCut = document.getElementById("trim-lossless-toggle")?.checked ?? true;
+
+    const customArgs = {};
+    if (isTrim) {
+        if (startTime) customArgs.start_time = startTime;
+        if (endTime) customArgs.end_time = endTime;
+        if (losslessCut) customArgs.lossless_trim = true;
+    }
+
+    setBtnLoading(btn, true);
+    if (progressCard) progressCard.classList.remove("hidden");
+    showStatus(statusBox, "Initializing FFmpeg transcode & compression engine...", "info");
+
+    try {
+        const res = await fetch("/api/convert/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                path: filepath,
+                preset: selectedCompressPreset,
+                custom_args: customArgs,
+                output_path: currentDestination
+            })
+        });
+        const data = await res.json();
+        if (res.ok && data.job_id) {
+            activeConvertJobId = data.job_id;
+            pollConvertProgress(data.job_id);
+        } else {
+            setBtnLoading(btn, false);
+            if (progressCard) progressCard.classList.add("hidden");
+            showStatus(statusBox, data.error || "Failed to start conversion.", "error");
+        }
+    } catch (e) {
+        setBtnLoading(btn, false);
+        if (progressCard) progressCard.classList.add("hidden");
+        showStatus(statusBox, `Network error: ${e.message}`, "error");
+    }
+}
+
+function pollConvertProgress(jobId) {
+    const btn = document.getElementById("btn-start-convert");
+    const fill = document.getElementById("convert-progress-fill");
+    const pctBadge = document.getElementById("convert-progress-percent");
+    const title = document.getElementById("convert-progress-title");
+    const statSpeed = document.getElementById("convert-stat-speed");
+    const statEta = document.getElementById("convert-stat-eta");
+    const statSize = document.getElementById("convert-stat-size");
+    const statusBox = document.getElementById("convert-status");
+
+    let timer = setInterval(async () => {
+        try {
+            const res = await fetch(`/api/progress/${jobId}`);
+            if (!res.ok) return;
+            const j = await res.json();
+
+            if (j.status === "processing" || j.status === "downloading") {
+                const pct = Math.min(100, Math.max(0, j.percent || 0)).toFixed(0);
+                if (fill) fill.style.width = `${pct}%`;
+                if (pctBadge) pctBadge.textContent = `${pct}%`;
+                if (title) title.textContent = j.message || "Encoding Media...";
+                if (statSpeed) statSpeed.textContent = j.speed ? `⚡ ${j.speed}` : "⚡ Processing";
+                if (statEta) statEta.textContent = j.eta ? `⏱ ${j.eta}` : "⏱ Active";
+                if (statSize) statSize.textContent = j.size ? `📦 ${j.size}` : "📦 Working";
+            } else if (j.status === "done") {
+                clearInterval(timer);
+                setBtnLoading(btn, false);
+                if (fill) fill.style.width = "100%";
+                if (pctBadge) pctBadge.textContent = "100%";
+                const outPath = j.filepath || "";
+                const actions = [];
+                if (outPath) {
+                    actions.push({
+                        label: "▶ Stream in App",
+                        className: "btn-card-stream",
+                        onClick: () => openMediaPlayer(outPath, "Converted Media")
+                    });
+                    actions.push({
+                        label: "🚀 OS Open",
+                        className: "btn-card-action done-open",
+                        onClick: () => openLibraryFile(outPath)
+                    });
+                }
+                actions.push({
+                    label: "📁 Folder",
+                    className: "btn-card-action",
+                    onClick: () => openFolder()
+                });
+                showStatusWithActions(statusBox, "Processing and compression complete! Saved to library.", "success", actions);
+                loadLibrary();
+            } else if (j.status === "error") {
+                clearInterval(timer);
+                setBtnLoading(btn, false);
+                showStatus(statusBox, `Conversion error: ${j.error || 'Failed'}`, "error");
+            } else if (j.status === "cancelled") {
+                clearInterval(timer);
+                setBtnLoading(btn, false);
+                showStatus(statusBox, "Conversion cancelled by user.", "info");
+            }
+        } catch {
+            // Keep polling
+        }
+    }, 800);
+}
+
+function cancelConvertJob() {
+    if (activeConvertJobId) {
+        fetch(`/api/cancel/${activeConvertJobId}`, { method: "POST" });
+        const statusBox = document.getElementById("convert-status");
+        showStatus(statusBox, "Cancelling conversion...", "info");
+    }
+}
+
 
 

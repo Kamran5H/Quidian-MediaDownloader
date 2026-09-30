@@ -185,8 +185,8 @@ def _move_into(output_path, stage_dir, primary_name=None, attempts=8):
 
 def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
                       postprocessor_hook=None, use_turbo=True, cookies_from_browser=None,
-                      use_stealth=True):
-    """Build high-reliability yt-dlp configuration with optional multi-connection aria2c booster and stealth headers."""
+                      use_stealth=True, remove_sponsors=True):
+    """Build high-reliability yt-dlp configuration with optional multi-connection aria2c booster, stealth headers, and SponsorBlock ad/sponsor excision."""
     quality = (quality or "4k").lower()
     fmt = QUALITY_FORMATS.get(quality, QUALITY_FORMATS["4k"])
     audio_only = quality == "audio"
@@ -240,14 +240,7 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
     }
 
     # aria2c turbo multi-connection acceleration (16 parallel streams).
-    #
-    # Trade-off worth knowing: yt-dlp does not call progress hooks while an
-    # external downloader owns the transfer, so a cancel request cannot
-    # interrupt aria2c mid-stream. It takes effect at the next format boundary
-    # or at post-processing. Nothing partial ever reaches the user's folder -
-    # the staging directory is wiped in `finally` - but the job can sit in
-    # "Cancelling..." until the current stream finishes. Turning turbo off
-    # makes cancellation immediate.
+    # Cancellation cannot gracefully interrupt aria2c mid-stream without terminating the external process.
     if use_turbo and check_aria2c_installed():
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = [
@@ -270,6 +263,20 @@ def build_engine_opts(stage_dir, temp_dir, quality="4k", progress_hook=None,
         opts["postprocessors"] = [
             {"key": "FFmpegMetadata"},
         ]
+
+    # Full Spectrum Ads-Free: excise sponsor segments, selfpromos, intros/outros and filler
+    if remove_sponsors:
+        opts["postprocessors"].extend([
+            {
+                "key": "SponsorBlock",
+                "categories": {"all"},
+                "when": "after_filter"
+            },
+            {
+                "key": "ModifyChapters",
+                "remove_sponsor_segments": {"all"}
+            }
+        ])
 
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
@@ -709,7 +716,8 @@ def _find_existing_video(output_path, video_id, is_audio=False):
 
 def download_playlist_sequential(url, output_path, quality="4k", progress_hook=None,
                                  postprocessor_hook=None, use_turbo=True, cookies_from_browser=None,
-                                 status_callback=None, use_stealth=True, cancel_check=None):
+                                 status_callback=None, use_stealth=True, cancel_check=None,
+                                 remove_sponsors=True):
     """
     Download each video in a playlist sequentially:
     Each video is downloaded into its own isolated stage, verified, and immediately
@@ -740,7 +748,7 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
             progress_hook=progress_hook, postprocessor_hook=postprocessor_hook,
             use_turbo=use_turbo, cookies_from_browser=cookies_from_browser,
             status_callback=status_callback, use_stealth=use_stealth,
-            cancel_check=cancel_check
+            cancel_check=cancel_check, remove_sponsors=remove_sponsors
         )
 
     playlist_title = meta.get("title") or "Playlist"
@@ -844,7 +852,8 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
             postprocessor_hook=postprocessor_hook,
             use_turbo=use_turbo,
             cookies_from_browser=cookies_from_browser,
-            use_stealth=use_stealth
+            use_stealth=use_stealth,
+            remove_sponsors=remove_sponsors
         )
         ydl_opts["noplaylist"] = True
         ydl_opts["outtmpl"] = {"default": f"{prefix}%(title).180s [%(id)s].%(ext)s"}
@@ -906,7 +915,8 @@ def download_playlist_sequential(url, output_path, quality="4k", progress_hook=N
 
 def download_media(url, output_path, quality="4k", progress_hook=None,
                    postprocessor_hook=None, use_turbo=True, cookies_from_browser=None,
-                   status_callback=None, use_stealth=True, cancel_check=None):
+                   status_callback=None, use_stealth=True, cancel_check=None,
+                   remove_sponsors=True):
     """
     Execute high-speed download into an isolated staging directory,
     then relocate safely into the destination folder without leaving temp clutter.
@@ -932,6 +942,7 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             status_callback=status_callback,
             use_stealth=use_stealth,
             cancel_check=cancel_check,
+            remove_sponsors=remove_sponsors,
         )
         if pl_res:
             return pl_res
@@ -999,7 +1010,7 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
         )
         try:
-            res = interceptor.bypass_and_extract(url, quality=quality)
+            res = interceptor.bypass_and_extract(url, quality=quality, cookies_from_browser=cookies_from_browser)
             if res and res.get("filepath"):
                 valid, err = verify_download_integrity(res["filepath"], is_audio=(quality == "audio"))
                 if not valid:
@@ -1026,7 +1037,8 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
         postprocessor_hook=postprocessor_hook,
         use_turbo=use_turbo,
         cookies_from_browser=cookies_from_browser,
-        use_stealth=use_stealth
+        use_stealth=use_stealth,
+        remove_sponsors=remove_sponsors,
     )
 
     try:
@@ -1065,7 +1077,7 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
                     interceptor = StealthStreamInterceptor(
                         output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
                     )
-                    full_res = interceptor.bypass_and_extract(url, quality=quality)
+                    full_res = interceptor.bypass_and_extract(url, quality=quality, cookies_from_browser=cookies_from_browser)
                     if full_res and full_res.get("filepath") and os.path.exists(full_res["filepath"]):
                         return full_res
                 except Exception as stealth_ex:
@@ -1109,7 +1121,7 @@ def download_media(url, output_path, quality="4k", progress_hook=None,
             interceptor = StealthStreamInterceptor(
                 output_path=output_path, status_callback=status_callback, cancel_check=cancel_check
             )
-            return interceptor.bypass_and_extract(url, quality=quality)
+            return interceptor.bypass_and_extract(url, quality=quality, cookies_from_browser=cookies_from_browser)
 
         raise RuntimeError(f"Engine failure: {e}")
     finally:

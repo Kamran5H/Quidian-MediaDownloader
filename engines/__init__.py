@@ -16,6 +16,8 @@ from .library import list_downloads, open_downloaded_file, reveal_in_explorer
 from .stealth_sniffer import StealthStreamInterceptor
 from .series import SeriesDownloader
 from .job_store import JobStore
+from .converter import convert_media, probe_media, PRESETS
+from .updater import get_engine_versions, upgrade_engine
 
 __all__ = [
     "JobStore",
@@ -36,4 +38,9 @@ __all__ = [
     "reveal_in_explorer",
     "StealthStreamInterceptor",
     "SeriesDownloader",
+    "convert_media",
+    "probe_media",
+    "PRESETS",
+    "get_engine_versions",
+    "upgrade_engine",
 ]

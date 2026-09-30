@@ -82,6 +82,14 @@
                     <span>Audio Studio &amp; Ripper</span>
                 </button>
 
+                <button class="nav-item" onclick="switchModule('compressor-module', this)">
+                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 14h6m-6-4h6m4-4l4 4-4 4m6-4v12"></path>
+                        <rect x="2" y="3" width="20" height="18" rx="2"></rect>
+                    </svg>
+                    <span>Compressor Studio</span>
+                </button>
+
                 <button class="nav-item" onclick="switchModule('library-module', this)">
                     <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
@@ -133,6 +141,10 @@
                     <span class="telemetry-pill" id="pill-aria2"><span class="pulse-dot cyan"></span>aria2c Multi-Stream</span>
                     <span class="telemetry-pill" id="pill-gallery"><span class="pulse-dot purple"></span>gallery-dl Scraper</span>
                     <span class="telemetry-pill" id="pill-ffmpeg"><span class="pulse-dot amber"></span>Checking FFmpeg...</span>
+                    <button class="telemetry-pill btn-telemetry-action" id="pill-updates" onclick="openEngineUpdateModal()" title="Check & Update Extraction Engines" style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(139, 92, 246, 0.3); cursor: pointer;">
+                        <span class="pulse-dot green" id="dot-updates"></span>
+                        <span id="text-updates">Engines: v2026.03.13 ⚡</span>
+                    </button>
                 </div>
 
                 <button class="btn-folder-glass" onclick="openFolder()">
@@ -192,11 +204,26 @@
                                     <option value="720p">📱 High Definition 720p (Faster)</option>
                                     <option value="audio">🎵 Studio Audio (MP3 320kbps + Album Art)</option>
                                 </select>
+
+                                <div style="margin-top: 0.75rem;">
+                                    <label for="link-cookie-source" class="field-label" style="display: flex; justify-content: space-between;">
+                                        <span>Stealth Browser Vault</span>
+                                        <span class="label-hint" id="link-cookie-hint">Auto-detected profiles</span>
+                                    </label>
+                                    <select id="link-cookie-source" class="glow-select">
+                                        <option value="" selected>🛡️ Anonymous Clean Session (No cookies)</option>
+                                    </select>
+                                </div>
                             </div>
 
                             <div class="input-wrapper">
                                 <label class="field-label">Engine Boosters &amp; Security</label>
                                 <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.3rem;">
+                                    <label class="toggle-control">
+                                        <input type="checkbox" id="link-sponsorblock-toggle" checked>
+                                        <span class="toggle-switch"></span>
+                                        <span class="toggle-text">🚫 Ads-Free SponsorBlock (Cut ads &amp; filler)</span>
+                                    </label>
                                     <label class="toggle-control">
                                         <input type="checkbox" id="link-turbo-toggle" checked>
                                         <span class="toggle-switch"></span>
@@ -281,6 +308,11 @@
                             <div class="input-wrapper">
                                 <label class="field-label">Engine Boosters &amp; Security</label>
                                 <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.3rem;">
+                                    <label class="toggle-control">
+                                        <input type="checkbox" id="search-sponsorblock-toggle" checked>
+                                        <span class="toggle-switch"></span>
+                                        <span class="toggle-text">🚫 Ads-Free SponsorBlock (Cut ads &amp; filler)</span>
+                                    </label>
                                     <label class="toggle-control">
                                         <input type="checkbox" id="search-turbo-toggle" checked>
                                         <span class="toggle-switch"></span>
@@ -516,7 +548,165 @@
             </section>
 
             <!-- ======================================================= -->
-            <!-- WORKSPACE 6: DOWNLOADS LIBRARY                          -->
+            <!-- WORKSPACE 6: MEDIA COMPRESSOR & TRIMMING STUDIO         -->
+            <!-- ======================================================= -->
+            <section id="compressor-module" class="module-view">
+                <div class="module-card glass-panel">
+                    <div class="module-header">
+                        <div class="module-title-group">
+                            <h2>⚡ Media Compressor &amp; Studio</h2>
+                            <p>Target-size compression for Discord, WhatsApp &amp; Web, lossless high-speed trimming, and format transcoding.</p>
+                        </div>
+                    </div>
+
+                    <!-- Source File Selection -->
+                    <div class="input-wrapper">
+                        <label for="compress-source-path" class="field-label">
+                            <span>Source Media File</span>
+                            <span class="label-hint">Select from downloads or enter file path</span>
+                        </label>
+                        <div class="input-with-action">
+                            <input type="text" id="compress-source-path" class="glow-input mono-text" placeholder="Select or paste local media file path..." onchange="onCompressSourceChanged()">
+                            <button class="paste-btn" type="button" onclick="chooseCompressFileFromLibrary()">Pick from Library</button>
+                        </div>
+                    </div>
+
+                    <!-- Probe Info Card (Shown when file is probed) -->
+                    <div id="compress-probe-card" class="probe-info-card glass-subpanel hidden" style="margin-top: 1rem; padding: 1.25rem;">
+                        <h4 style="font-size: 0.88rem; margin-bottom: 0.8rem; color: var(--aurora-2);">📊 Media Inspection Analysis</h4>
+                        <div class="grid-3-col" style="gap: 0.75rem;">
+                            <div class="stat-pill"><span style="color: var(--text-dim); font-size: 0.75rem;">File Size:</span> <strong id="probe-size">--</strong></div>
+                            <div class="stat-pill"><span style="color: var(--text-dim); font-size: 0.75rem;">Duration:</span> <strong id="probe-duration">--</strong></div>
+                            <div class="stat-pill"><span style="color: var(--text-dim); font-size: 0.75rem;">Resolution:</span> <strong id="probe-resolution">--</strong></div>
+                            <div class="stat-pill"><span style="color: var(--text-dim); font-size: 0.75rem;">Video Codec:</span> <strong id="probe-vcodec">--</strong></div>
+                            <div class="stat-pill"><span style="color: var(--text-dim); font-size: 0.75rem;">Audio Codec:</span> <strong id="probe-acodec">--</strong></div>
+                            <div class="stat-pill"><span style="color: var(--text-dim); font-size: 0.75rem;">Total Bitrate:</span> <strong id="probe-bitrate">--</strong></div>
+                        </div>
+                    </div>
+
+                    <!-- Compression & Target Presets Grid -->
+                    <div class="input-wrapper" style="margin-top: 1.25rem;">
+                        <label class="field-label">Choose Target Size &amp; Transcode Preset</label>
+                        <div class="presets-grid" id="compress-presets-grid">
+                            <div class="preset-card active" data-preset="discord_25mb" onclick="selectCompressPreset('discord_25mb', this)">
+                                <div class="preset-badge">⚡ Discord 25MB</div>
+                                <div class="preset-name">Discord Free Nitro Limit</div>
+                                <div class="preset-desc">Auto-calculates optimal bitrate to guarantee &lt; 25MB for flawless Discord uploads.</div>
+                            </div>
+                            <div class="preset-card" data-preset="discord_8mb" onclick="selectCompressPreset('discord_8mb', this)">
+                                <div class="preset-badge">📱 Discord 8MB</div>
+                                <div class="preset-name">Classic Non-Nitro 8MB</div>
+                                <div class="preset-desc">Ultra-compact compression for legacy standard Discord file upload limit.</div>
+                            </div>
+                            <div class="preset-card" data-preset="discord_50mb" onclick="selectCompressPreset('discord_50mb', this)">
+                                <div class="preset-badge">🚀 Discord 50MB</div>
+                                <div class="preset-name">Nitro Basic 50MB</div>
+                                <div class="preset-desc">High-clarity compression target for modern Discord Nitro Basic sharing.</div>
+                            </div>
+                            <div class="preset-card" data-preset="whatsapp_16mb" onclick="selectCompressPreset('whatsapp_16mb', this)">
+                                <div class="preset-badge">💬 WhatsApp 16MB</div>
+                                <div class="preset-name">WhatsApp Safe Limit</div>
+                                <div class="preset-desc">Instant compression under 16MB for mobile messaging and stories.</div>
+                            </div>
+                            <div class="preset-card" data-preset="web_mp4_1080p" onclick="selectCompressPreset('web_mp4_1080p', this)">
+                                <div class="preset-badge">🎬 Web 1080p H.264</div>
+                                <div class="preset-name">Universal MP4 Compatibility</div>
+                                <div class="preset-desc">Zero playback issues across all phones, tablets, browsers and smart TVs.</div>
+                            </div>
+                            <div class="preset-card" data-preset="web_av1" onclick="selectCompressPreset('web_av1', this)">
+                                <div class="preset-badge">💎 Modern SVT-AV1</div>
+                                <div class="preset-name">Next-Gen AV1 Master</div>
+                                <div class="preset-desc">Half the file size of H.264 with crystal-clear fidelity and efficiency.</div>
+                            </div>
+                            <div class="preset-card" data-preset="web_hevc" onclick="selectCompressPreset('web_hevc', this)">
+                                <div class="preset-badge">🎥 High Efficiency H.265</div>
+                                <div class="preset-name">HEVC Master</div>
+                                <div class="preset-desc">Pristine 4K and 1080p compression with small storage footprint.</div>
+                            </div>
+                            <div class="preset-card" data-preset="gif_hq" onclick="selectCompressPreset('gif_hq', this)">
+                                <div class="preset-badge">✨ HQ Animated GIF</div>
+                                <div class="preset-name">Two-Pass PaletteGen GIF</div>
+                                <div class="preset-desc">Smooth 25fps animated GIF without color banding or dithering artifacts.</div>
+                            </div>
+                            <div class="preset-card" data-preset="audio_mp3_320k" onclick="selectCompressPreset('audio_mp3_320k', this)">
+                                <div class="preset-badge">🎵 Studio MP3 320k</div>
+                                <div class="preset-name">Pure Audio Extraction</div>
+                                <div class="preset-desc">Direct stream copy or high-res 320kbps MP3 audio rip.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Lossless Trimmer Module -->
+                    <div class="input-wrapper" style="margin-top: 1.25rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <label class="field-label">✂️ Lossless Trimmer (Optional)</label>
+                            <label class="toggle-control small">
+                                <input type="checkbox" id="trim-enabled-toggle" onchange="toggleTrimSection()">
+                                <span class="toggle-switch"></span>
+                                <span class="toggle-text">Enable Trimming</span>
+                            </label>
+                        </div>
+                        <div id="trim-controls" class="glass-subpanel hidden" style="margin-top: 0.5rem; padding: 1rem;">
+                            <div class="grid-2-col">
+                                <div>
+                                    <label for="trim-start-time" class="field-label">Start Time (HH:MM:SS or seconds)</label>
+                                    <input type="text" id="trim-start-time" class="glow-input mono-text" placeholder="00:00:00" value="00:00:00">
+                                </div>
+                                <div>
+                                    <label for="trim-end-time" class="field-label">End Time (HH:MM:SS or seconds)</label>
+                                    <input type="text" id="trim-end-time" class="glow-input mono-text" placeholder="00:01:30">
+                                </div>
+                            </div>
+                            <div style="margin-top: 0.75rem;">
+                                <label class="toggle-control small">
+                                    <input type="checkbox" id="trim-lossless-toggle" checked>
+                                    <span class="toggle-switch"></span>
+                                    <span class="toggle-text">⚡ Instant Keyframe Stream-Copy (Lossless cut in under 1 second without re-encoding)</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Destination Bar -->
+                    <div class="dest-preview-bar">
+                        <div class="dest-preview-info">
+                            <span class="dest-preview-icon">📂</span>
+                            <span class="dest-preview-label">Saving to:</span>
+                            <span class="dest-preview-path" id="compress-dest-display">Loading folder...</span>
+                        </div>
+                        <button type="button" class="btn-change-folder-link" onclick="openDestinationModal()">Change Folder</button>
+                    </div>
+
+                    <button id="btn-start-convert" class="btn-action-glow" onclick="startConversion()">
+                        <span class="btn-text">Start Processing &amp; Compression ⚡</span>
+                        <div class="spinner hidden"></div>
+                    </button>
+
+                    <!-- Progress Bar -->
+                    <div id="convert-progress" class="progress-container glass-subpanel hidden">
+                        <div class="progress-header">
+                            <div class="progress-title-row">
+                                <span class="pulse-indicator"></span>
+                                <span class="progress-title" id="convert-progress-title">Encoding Media...</span>
+                            </div>
+                            <span class="progress-percent-badge" id="convert-progress-percent">0%</span>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-bar-fill" id="convert-progress-fill"></div>
+                        </div>
+                        <div class="telemetry-stats">
+                            <span class="stat-item" id="convert-stat-speed">⚡ -- fps</span>
+                            <span class="stat-item" id="convert-stat-eta">⏱ Estimating...</span>
+                            <span class="stat-item" id="convert-stat-size">📦 Working</span>
+                        </div>
+                        <button id="convert-cancel" class="btn-cancel-glass" onclick="cancelConvertJob()">Cancel Operation</button>
+                    </div>
+                    <div id="convert-status" class="status-box"></div>
+                </div>
+            </section>
+
+            <!-- ======================================================= -->
+            <!-- WORKSPACE 7: DOWNLOADS LIBRARY                          -->
             <!-- ======================================================= -->
             <section id="library-module" class="module-view">
                 <div class="module-card glass-panel">
@@ -692,6 +882,88 @@
                 </div>
                 <button type="button" class="btn-cinema-download" id="cinema-download-btn" onclick="downloadFromCinemaModal()">
                     ⚡ Download Offline MP4
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======================================================= -->
+    <!-- IN-APP AD-FREE ULTRA-STREAMING MEDIA PLAYER             -->
+    <!-- ======================================================= -->
+    <div id="media-player-modal" class="cinema-modal-overlay hidden" onclick="if(event.target===this)closeMediaPlayer()">
+        <div class="cinema-modal-container glass-panel player-custom-modal">
+            <div class="cinema-modal-header">
+                <div class="cinema-title-group">
+                    <span class="cinema-badge" style="background: rgba(59, 130, 246, 0.2); border-color: rgba(59, 130, 246, 0.4); color: #60a5fa;">🛡️ AD-FREE &bull; RANGE STREAMING &bull; PRIVATE</span>
+                    <h3 id="player-media-title">Media Playback</h3>
+                </div>
+                <div class="cinema-controls">
+                    <button type="button" class="btn-cinema-source" onclick="sendPlayerFileToCompressor()">⚡ Open in Compressor</button>
+                    <button type="button" class="btn-cinema-close" onclick="closeMediaPlayer()">&times;</button>
+                </div>
+            </div>
+            <div class="cinema-player-wrapper player-wrapper-box" style="display: flex; justify-content: center; align-items: center; background: #000; min-height: 400px; border-radius: 12px; overflow: hidden;">
+                <video id="in-app-video-player" controls preload="metadata" playsinline style="width: 100%; max-height: 65vh; border-radius: 8px;">
+                    Your browser does not support HTML5 video streaming.
+                </video>
+                <audio id="in-app-audio-player" controls preload="metadata" class="hidden" style="width: 90%; margin: 2rem auto;"></audio>
+            </div>
+            <div class="cinema-modal-footer player-modal-footer" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem;">
+                <div class="player-quick-tools" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                    <span style="font-size: 0.8rem; color: var(--text-dim);">Speed:</span>
+                    <button class="speed-btn active" onclick="setPlayerSpeed(1.0, this)">1.0x</button>
+                    <button class="speed-btn" onclick="setPlayerSpeed(1.25, this)">1.25x</button>
+                    <button class="speed-btn" onclick="setPlayerSpeed(1.5, this)">1.5x</button>
+                    <button class="speed-btn" onclick="setPlayerSpeed(2.0, this)">2.0x</button>
+                    <button type="button" class="btn-folder-glass" style="padding: 0.35rem 0.75rem; font-size: 0.78rem;" onclick="capturePlayerSnapshot()" title="Capture High-Res Frame Snapshot">📸 Snapshot</button>
+                    <button type="button" class="btn-folder-glass" style="padding: 0.35rem 0.75rem; font-size: 0.78rem;" onclick="revealCurrentPlayingFile()" title="Reveal file in Windows Explorer">📂 Show in Folder</button>
+                </div>
+                <div id="player-file-info-label" style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-dim);"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======================================================= -->
+    <!-- CORE EXTRACTION ENGINE UPDATER MODAL                    -->
+    <!-- ======================================================= -->
+    <div id="engine-updater-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeEngineUpdateModal()">
+        <div class="modal-card glass-panel" onclick="event.stopPropagation()" style="max-width: 520px;">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-badge">🚀</div>
+                    <div>
+                        <h3>Core Extraction Engines</h3>
+                        <p>Keep yt-dlp &amp; gallery-dl up-to-date with 1-click PyPI upgrades.</p>
+                    </div>
+                </div>
+                <button class="modal-close-btn" onclick="closeEngineUpdateModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding: 1.5rem;">
+                <div id="engine-versions-container" style="display: flex; flex-direction: column; gap: 1rem;">
+                    <div class="glass-subpanel" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem;">
+                        <div>
+                            <div style="font-weight: 700; color: #fff;">⚡ yt-dlp Extractor Core</div>
+                            <div id="ytdlp-ver-label" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); margin-top: 0.25rem;">Checking PyPI status...</div>
+                        </div>
+                        <button class="btn-folder-glass" id="btn-update-ytdlp" onclick="runEngineUpdate('yt-dlp')">Update</button>
+                    </div>
+                    <div class="glass-subpanel" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem;">
+                        <div>
+                            <div style="font-weight: 700; color: #fff;">📸 gallery-dl Scraper Core</div>
+                            <div id="gallerydl-ver-label" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); margin-top: 0.25rem;">Checking PyPI status...</div>
+                        </div>
+                        <button class="btn-folder-glass" id="btn-update-gallerydl" onclick="runEngineUpdate('gallery-dl')">Update</button>
+                    </div>
+                </div>
+                <div id="updater-progress-box" class="glass-subpanel hidden" style="margin-top: 1rem; padding: 0.8rem; display: flex; align-items: center; gap: 0.75rem;">
+                    <span class="pulse-indicator"></span>
+                    <span id="updater-progress-text" style="font-size: 0.85rem; color: var(--aurora-1);">Upgrading engine...</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel-glass" onclick="closeEngineUpdateModal()">Close</button>
+                <button class="btn-action-glow" id="btn-update-all-engines" onclick="runEngineUpdate('all')">
+                    <span>⚡ Update All Engines</span>
                 </button>
             </div>
         </div>
