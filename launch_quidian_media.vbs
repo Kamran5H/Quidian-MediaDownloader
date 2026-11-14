@@ -8,11 +8,13 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 
 appDir = fso.GetParentFolderName(WScript.ScriptFullName)
 If Not fso.FileExists(appDir & "\app.py") Then
+    Dim userProfInit
+    userProfInit = WshShell.ExpandEnvironmentStrings("%USERPROFILE%")
     candidates = Array( _
-        "C:\Users\chkam\OneDrive\Desktop\Media_Downloader_Project", _
-        "C:\Users\chkam\OneDrive\Desktop\02_Projects & Development\Media_Downloader_Project", _
-        "C:\Users\chkam\Desktop\Media_Downloader_Project", _
-        "C:\Users\chkam\Desktop\02_Projects & Development\Media_Downloader_Project" _
+        userProfInit & "\OneDrive\Desktop\Media_Downloader_Project", _
+        userProfInit & "\OneDrive\Desktop\02_Projects & Development\Media_Downloader_Project", _
+        userProfInit & "\Desktop\Media_Downloader_Project", _
+        userProfInit & "\Desktop\02_Projects & Development\Media_Downloader_Project" _
     )
     For Each cand In candidates
         If fso.FileExists(cand & "\app.py") Then
@@ -47,12 +49,11 @@ userProf = WshShell.ExpandEnvironmentStrings("%USERPROFILE%")
 localApp = WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%")
 pyw = ""
 
-Dim pyCandidates(4)
+Dim pyCandidates(3)
 pyCandidates(0) = localApp & "\Programs\Python\Python314\pythonw.exe"
 pyCandidates(1) = localApp & "\Programs\Python\Python311\pythonw.exe"
 pyCandidates(2) = userProf & "\miniconda3\envs\quidian\pythonw.exe"
 pyCandidates(3) = userProf & "\anaconda3\envs\quidian\pythonw.exe"
-pyCandidates(4) = "C:\Users\chkam\AppData\Local\Programs\Python\Python314\pythonw.exe"
 
 For Each cand In pyCandidates
   If fso.FileExists(cand) Then
